@@ -212,10 +212,226 @@ def validate(payload: object) -> dict[str, Any]:
     return data
 
 
+def _runway_months(as_of: date, crossing: date | None) -> Decimal | str:
+    if crossing is None:
+        return "more_than_12_months"
+    return Decimal((crossing - as_of).days) / Decimal("30.4375")
+
+
+def _warning_status(as_of: date, crossing: date | None, policy: dict[str, object] | None) -> str:
+    if crossing is None:
+        return "stable"
+    thresholds = policy or {
+        "critical_days": 91,
+        "warning_days": 183,
+        "watch_days": 366,
+    }
+    elapsed = (crossing - as_of).days
+    if elapsed < thresholds["critical_days"]:
+        return "critical"
+    if elapsed < thresholds["warning_days"]:
+        return "warning"
+    return "watch"
+
+
+def _scenario_missing_inputs(
+    scenario: dict[str, Any], core_missing: list[str]
+) -> list[str]:
+    missing = list(core_missing)
+    for period in scenario["periods"]:
+        for movement in period["movements"]:
+            if movement["amount"]["evidence"] == "unknown":
+                missing.append(f"movement:{movement['id']}")
+    return missing
+
+
+def _indeterminate_scenario(name: str, missing_inputs: list[str]) -> dict[str, object]:
+    return {
+        "name": name,
+        "warning_status": "indeterminate",
+        "missing_inputs": missing_inputs,
+        "periods": [],
+        "buffer_crossing_period": None,
+        "buffer_crossing_date": None,
+        "buffer_runway": None,
+        "zero_crossing_period": None,
+        "zero_crossing_date": None,
+        "zero_cash_runway": None,
+        "lowest_closing_available_cash": None,
+        "lowest_cash_period": None,
+        "maximum_funding_gap": None,
+        "last_modeled_period": None,
+        "comparison_to_base": None,
+    }
+
+
+def calculate_scenario(
+    scenario: dict[str, Any],
+    *,
+    opening_available_cash: Decimal,
+    minimum_cash_buffer: Decimal,
+    as_of: date,
+    warning_policy: dict[str, object] | None,
+) -> dict[str, object]:
+    """Calculate one fully known scenario."""
+    opening = opening_available_cash
+    lowest: Decimal | None = None
+    lowest_period: str | None = None
+    buffer_crossing_period: str | None = None
+    buffer_crossing_date: date | None = None
+    zero_crossing_period: str | None = None
+    zero_crossing_date: date | None = None
+    calculated_periods: list[dict[str, object]] = []
+
+    for period in scenario["periods"]:
+        inflows = Decimal("0")
+        outflows = Decimal("0")
+        for movement in period["movements"]:
+            amount = _money_value(movement["amount"], f"movement {movement['id']}.amount")
+            if amount is None:
+                raise ValueError("calculate_scenario received an unknown movement")
+            if movement["direction"] == "inflow":
+                inflows += amount
+            else:
+                outflows += amount
+
+        closing = opening + inflows - outflows
+        period_end = date.fromisoformat(period["end_date"])
+        if lowest is None or closing < lowest:
+            lowest = closing
+            lowest_period = period["id"]
+        if buffer_crossing_date is None and closing < minimum_cash_buffer:
+            buffer_crossing_period = period["id"]
+            buffer_crossing_date = period_end
+        if zero_crossing_date is None and closing < 0:
+            zero_crossing_period = period["id"]
+            zero_crossing_date = period_end
+
+        calculated_periods.append(
+            {
+                "id": period["id"],
+                "start_date": period["start_date"],
+                "end_date": period["end_date"],
+                "granularity": period["granularity"],
+                "opening_available_cash": opening,
+                "cash_inflows": inflows,
+                "cash_outflows": outflows,
+                "net_cash_flow": inflows - outflows,
+                "closing_available_cash": closing,
+            }
+        )
+        opening = closing
+
+    assert lowest is not None
+    earliest_crossing = min(
+        (item for item in (buffer_crossing_date, zero_crossing_date) if item is not None),
+        default=None,
+    )
+    return {
+        "name": scenario["name"],
+        "warning_status": _warning_status(as_of, earliest_crossing, warning_policy),
+        "missing_inputs": [],
+        "periods": calculated_periods,
+        "buffer_crossing_period": buffer_crossing_period,
+        "buffer_crossing_date": buffer_crossing_date.isoformat() if buffer_crossing_date else None,
+        "buffer_runway": _runway_months(as_of, buffer_crossing_date),
+        "zero_crossing_period": zero_crossing_period,
+        "zero_crossing_date": zero_crossing_date.isoformat() if zero_crossing_date else None,
+        "zero_cash_runway": _runway_months(as_of, zero_crossing_date),
+        "lowest_closing_available_cash": lowest,
+        "lowest_cash_period": lowest_period,
+        "maximum_funding_gap": max(Decimal("0"), minimum_cash_buffer - lowest),
+        "last_modeled_period": calculated_periods[-1]["id"],
+        "comparison_to_base": None,
+    }
+
+
+def _crossing_days(result: dict[str, object], field: str, as_of: date) -> int | None:
+    value = result[field]
+    if value is None:
+        return None
+    return (date.fromisoformat(value) - as_of).days
+
+
+def _comparison(
+    result: dict[str, object], base: dict[str, object], as_of: date
+) -> dict[str, object] | None:
+    if result["warning_status"] == "indeterminate" or base["warning_status"] == "indeterminate":
+        return None
+
+    def crossing_delta(field: str) -> int | None:
+        result_days = _crossing_days(result, field, as_of)
+        base_days = _crossing_days(base, field, as_of)
+        if result_days is None or base_days is None:
+            return None
+        return result_days - base_days
+
+    return {
+        "lowest_cash_delta": result["lowest_closing_available_cash"]
+        - base["lowest_closing_available_cash"],
+        "maximum_funding_gap_delta": result["maximum_funding_gap"]
+        - base["maximum_funding_gap"],
+        "buffer_crossing_days_delta": crossing_delta("buffer_crossing_date"),
+        "zero_crossing_days_delta": crossing_delta("zero_crossing_date"),
+    }
+
+
 def calculate(payload: dict[str, object]) -> dict[str, object]:
     """Validate a runway payload and return calculated results."""
     data = validate(payload)
-    return {"mode": data["mode"], "currency": data["currency"]}
+    as_of = date.fromisoformat(data["as_of_date"])
+    gross_cash = _money_value(data["gross_cash"], "gross_cash")
+    restricted_cash = _money_value(data["restricted_cash"], "restricted_cash")
+    minimum_cash_buffer = _money_value(data["minimum_cash_buffer"], "minimum_cash_buffer")
+    core_values = {
+        "gross_cash": gross_cash,
+        "restricted_cash": restricted_cash,
+        "minimum_cash_buffer": minimum_cash_buffer,
+    }
+    core_missing = [name for name, value in core_values.items() if value is None]
+    opening_available_cash = (
+        gross_cash - restricted_cash
+        if gross_cash is not None and restricted_cash is not None
+        else None
+    )
+
+    scenario_results: list[dict[str, object]] = []
+    for scenario in data["scenarios"]:
+        missing_inputs = _scenario_missing_inputs(scenario, core_missing)
+        if missing_inputs:
+            result = _indeterminate_scenario(scenario["name"], missing_inputs)
+        else:
+            assert opening_available_cash is not None
+            assert minimum_cash_buffer is not None
+            result = calculate_scenario(
+                scenario,
+                opening_available_cash=opening_available_cash,
+                minimum_cash_buffer=minimum_cash_buffer,
+                as_of=as_of,
+                warning_policy=data.get("warning_policy"),
+            )
+        scenario_results.append(result)
+
+    base = next(result for result in scenario_results if result["name"] == "base")
+    for result in scenario_results:
+        if result is not base:
+            result["comparison_to_base"] = _comparison(result, base, as_of)
+
+    provisional = data["mode"] == "quick" or any(
+        result["warning_status"] == "indeterminate" for result in scenario_results
+    )
+    return {
+        "mode": data["mode"],
+        "as_of_date": data["as_of_date"],
+        "currency": data["currency"],
+        "opening_available_cash": opening_available_cash,
+        "minimum_cash_buffer": minimum_cash_buffer,
+        "provisional": provisional,
+        "missing_core_inputs": core_missing,
+        "warning_status": base["warning_status"],
+        "scenarios": scenario_results,
+        "modeled_actions": [],
+    }
 
 
 def _json_default(value: object) -> int | float:

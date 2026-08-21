@@ -76,6 +76,42 @@ def detailed_payload() -> dict[str, object]:
     }
 
 
+def quick_periods(as_of: date = date(2026, 1, 5)) -> list[dict[str, object]]:
+    periods: list[dict[str, object]] = []
+    start = as_of
+    horizon_end = add_months(as_of, 12) - timedelta(days=1)
+    index = 1
+    while start <= horizon_end:
+        calendar_end = date(start.year, start.month, calendar.monthrange(start.year, start.month)[1])
+        end = min(calendar_end, horizon_end)
+        periods.append(
+            {
+                "id": f"m{index:02d}",
+                "start_date": start.isoformat(),
+                "end_date": end.isoformat(),
+                "granularity": "month",
+                "movements": [],
+            }
+        )
+        start = end + timedelta(days=1)
+        index += 1
+    return periods
+
+
+def movement(
+    movement_id: str,
+    direction: str,
+    amount: int | float | None,
+    evidence: str = "estimated",
+) -> dict[str, object]:
+    return {
+        "id": movement_id,
+        "label": movement_id.replace("-", " ").title(),
+        "direction": direction,
+        "amount": money(amount, evidence),
+    }
+
+
 class ValidationTests(unittest.TestCase):
     def test_rejects_unknown_encoded_as_zero(self) -> None:
         payload = detailed_payload()
@@ -140,6 +176,108 @@ class ValidationTests(unittest.TestCase):
         payload["currency"] = "yen"
         with self.assertRaisesRegex(ValueError, "currency must be a three-letter code"):
             calculate(payload)
+
+
+class CalculationTests(unittest.TestCase):
+    def test_stable_detailed_forecast(self) -> None:
+        payload = detailed_payload()
+        payload["scenarios"][0]["periods"][0]["movements"] = [
+            movement("weekly-tools", "outflow", 100_000, "confirmed")
+        ]
+
+        result = calculate(payload)
+
+        base = result["scenarios"][0]
+        self.assertEqual(result["opening_available_cash"], 1_500_000)
+        self.assertEqual(base["periods"][0]["closing_available_cash"], 1_400_000)
+        self.assertEqual(base["lowest_closing_available_cash"], 1_400_000)
+        self.assertEqual(base["maximum_funding_gap"], 0)
+        self.assertEqual(base["buffer_runway"], "more_than_12_months")
+        self.assertEqual(base["zero_cash_runway"], "more_than_12_months")
+        self.assertEqual(base["warning_status"], "stable")
+        self.assertFalse(result["provisional"])
+
+    def test_buffer_crosses_inside_thirteen_weeks_without_zero_crossing(self) -> None:
+        payload = detailed_payload()
+        for index in range(11):
+            payload["scenarios"][0]["periods"][index]["movements"] = [
+                movement(f"weekly-cost-{index}", "outflow", 100_000)
+            ]
+
+        result = calculate(payload)
+        base = result["scenarios"][0]
+
+        self.assertEqual(base["buffer_crossing_period"], "w11")
+        self.assertIsNone(base["zero_crossing_period"])
+        self.assertEqual(base["warning_status"], "critical")
+        self.assertEqual(base["maximum_funding_gap"], 100_000)
+
+    def test_zero_crossing_and_maximum_funding_gap(self) -> None:
+        payload = detailed_payload()
+        payload["scenarios"][0]["periods"][0]["movements"] = [
+            movement("large-payment", "outflow", 2_000_000, "confirmed")
+        ]
+
+        base = calculate(payload)["scenarios"][0]
+
+        self.assertEqual(base["buffer_crossing_period"], "w01")
+        self.assertEqual(base["zero_crossing_period"], "w01")
+        self.assertEqual(base["lowest_closing_available_cash"], -500_000)
+        self.assertEqual(base["maximum_funding_gap"], 1_000_000)
+
+    def test_downside_collection_delay_changes_status(self) -> None:
+        payload = detailed_payload()
+        base = payload["scenarios"][0]
+        base["periods"][0]["movements"] = [movement("invoice", "inflow", 1_000_000)]
+        base["periods"][1]["movements"] = [movement("renewal", "outflow", 1_200_000)]
+        downside = copy.deepcopy(base)
+        downside["name"] = "downside"
+        downside["periods"][0]["movements"] = []
+        downside["periods"][9]["movements"] = [movement("invoice-delayed", "inflow", 1_000_000)]
+        payload["scenarios"].append(downside)
+
+        result = calculate(payload)
+        base_result, downside_result = result["scenarios"]
+
+        self.assertEqual(base_result["warning_status"], "stable")
+        self.assertEqual(downside_result["warning_status"], "critical")
+        self.assertEqual(downside_result["comparison_to_base"]["lowest_cash_delta"], -1_000_000)
+
+    def test_payment_on_period_boundary_is_included_in_that_period(self) -> None:
+        payload = detailed_payload()
+        payload["scenarios"][0]["periods"][0]["movements"] = [
+            movement("period-end-payment", "outflow", 250_000, "reported")
+        ]
+
+        first_period = calculate(payload)["scenarios"][0]["periods"][0]
+
+        self.assertEqual(first_period["cash_outflows"], 250_000)
+        self.assertEqual(first_period["closing_available_cash"], 1_250_000)
+
+    def test_quick_mode_is_provisional(self) -> None:
+        payload = detailed_payload()
+        payload["mode"] = "quick"
+        payload["scenarios"][0]["periods"] = quick_periods()
+        payload["scenarios"][0]["periods"][0]["movements"] = [
+            movement("normal-monthly-outflow", "outflow", 300_000)
+        ]
+
+        result = calculate(payload)
+
+        self.assertTrue(result["provisional"])
+        self.assertEqual(result["scenarios"][0]["periods"][0]["cash_outflows"], 300_000)
+
+    def test_unknown_movement_makes_scenario_indeterminate(self) -> None:
+        payload = detailed_payload()
+        payload["scenarios"][0]["periods"][0]["movements"] = [
+            movement("unknown-tax", "outflow", None, "unknown")
+        ]
+
+        result = calculate(payload)
+
+        self.assertTrue(result["provisional"])
+        self.assertEqual(result["warning_status"], "indeterminate")
+        self.assertEqual(result["scenarios"][0]["missing_inputs"], ["movement:unknown-tax"])
 
 
 if __name__ == "__main__":
