@@ -280,5 +280,114 @@ class CalculationTests(unittest.TestCase):
         self.assertEqual(result["scenarios"][0]["missing_inputs"], ["movement:unknown-tax"])
 
 
+class ActionAndCliTests(unittest.TestCase):
+    def test_action_applies_cash_effects_and_implementation_cost(self) -> None:
+        payload = detailed_payload()
+        payload["modeled_actions"] = [
+            {
+                "id": "reduce-tools",
+                "label": "Reduce unused software",
+                "scenarios": ["base"],
+                "start_period": "w03",
+                "end_period": "w04",
+                "recurrence": "expanded",
+                "cash_effects": [
+                    {"period_id": "w03", "amount": money(25_000)},
+                    {"period_id": "w04", "amount": money(25_000)},
+                ],
+                "implementation_costs": [
+                    {"period_id": "w03", "amount": money(10_000, "reported")}
+                ],
+            }
+        ]
+
+        action = calculate(payload)["modeled_actions"][0]
+
+        self.assertEqual(action["gross_cash_effect"], 50_000)
+        self.assertEqual(action["implementation_cost"], 10_000)
+        self.assertEqual(action["net_cash_effect"], 40_000)
+        self.assertEqual(action["adjusted"]["periods"][2]["closing_available_cash"], 1_515_000)
+        self.assertEqual(action["adjusted"]["periods"][3]["closing_available_cash"], 1_540_000)
+        self.assertEqual(action["delta"]["lowest_cash_delta"], 0)
+
+    def test_action_is_recalculated_independently(self) -> None:
+        payload = detailed_payload()
+        payload["modeled_actions"] = [
+            {
+                "id": action_id,
+                "label": action_id,
+                "scenarios": ["base"],
+                "start_period": "w01",
+                "end_period": "w01",
+                "recurrence": "one_time",
+                "cash_effects": [{"period_id": "w01", "amount": money(amount)}],
+                "implementation_costs": [],
+            }
+            for action_id, amount in (("action-a", 10_000), ("action-b", 20_000))
+        ]
+
+        first, second = calculate(payload)["modeled_actions"]
+
+        self.assertEqual(first["adjusted"]["periods"][0]["closing_available_cash"], 1_510_000)
+        self.assertEqual(second["adjusted"]["periods"][0]["closing_available_cash"], 1_520_000)
+
+    def test_rejects_duplicate_action_ids(self) -> None:
+        payload = detailed_payload()
+        action = {
+            "id": "same-action",
+            "label": "Same action",
+            "scenarios": ["base"],
+            "start_period": "w01",
+            "end_period": "w01",
+            "recurrence": "one_time",
+            "cash_effects": [{"period_id": "w01", "amount": money(10_000)}],
+            "implementation_costs": [],
+        }
+        payload["modeled_actions"] = [copy.deepcopy(action), copy.deepcopy(action)]
+
+        with self.assertRaisesRegex(ValueError, "duplicate action id"):
+            calculate(payload)
+
+    def test_rejects_action_without_effective_period(self) -> None:
+        payload = detailed_payload()
+        payload["modeled_actions"] = [
+            {
+                "id": "missing-period",
+                "label": "Missing period",
+                "scenarios": ["base"],
+                "start_period": "w01",
+                "end_period": "w01",
+                "recurrence": "one_time",
+                "cash_effects": [{"amount": money(10_000)}],
+                "implementation_costs": [],
+            }
+        ]
+
+        with self.assertRaisesRegex(ValueError, "period_id"):
+            calculate(payload)
+
+    def test_cli_outputs_json_for_valid_input(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "payload.json"
+            path.write_text(json.dumps(detailed_payload()), encoding="utf-8")
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                status = main([str(path)])
+
+        self.assertEqual(status, 0)
+        self.assertEqual(json.loads(stdout.getvalue())["warning_status"], "stable")
+
+    def test_cli_reports_malformed_json_to_stderr(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "broken.json"
+            path.write_text("{broken", encoding="utf-8")
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                status = main([str(path)])
+
+        self.assertEqual(status, 2)
+        self.assertIn("error:", stderr.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import calendar
+import copy
 import json
 import math
 import re
@@ -85,11 +86,12 @@ def _validate_periods(
     mode: str,
     as_of: date,
     currency: str,
-) -> None:
+) -> list[str]:
     if not isinstance(periods, list) or not periods:
         raise ValueError(f"scenario {scenario_name} periods must be a nonempty list")
 
     period_ids: set[str] = set()
+    period_id_order: list[str] = []
     movement_ids: set[str] = set()
     previous_end: date | None = None
     parsed_periods: list[tuple[date, date, str]] = []
@@ -101,6 +103,7 @@ def _validate_periods(
         if period_id in period_ids:
             raise ValueError(f"duplicate period id {period_id} in scenario {scenario_name}")
         period_ids.add(period_id)
+        period_id_order.append(period_id)
 
         start = _parse_date(period.get("start_date"), f"{path}.start_date")
         end = _parse_date(period.get("end_date"), f"{path}.end_date")
@@ -149,6 +152,7 @@ def _validate_periods(
                 raise ValueError(f"scenario {scenario_name} weekly periods must contain seven days")
     elif any(item[2] != "month" for item in parsed_periods):
         raise ValueError(f"scenario {scenario_name} quick-mode periods must be monthly")
+    return period_id_order
 
 
 def _validate_warning_policy(value: object) -> None:
@@ -166,6 +170,75 @@ def _validate_warning_policy(value: object) -> None:
         numbers.append(raw)
     if numbers != sorted(numbers) or len(set(numbers)) != 3:
         raise ValueError("warning_policy day thresholds must be strictly ascending")
+
+
+def _validate_actions(
+    value: object,
+    *,
+    scenario_period_ids: dict[str, list[str]],
+    currency: str,
+) -> None:
+    if not isinstance(value, list):
+        raise ValueError("modeled_actions must be a list")
+    action_ids: set[str] = set()
+    for index, raw_action in enumerate(value):
+        path = f"modeled_action {index}"
+        action = _require_object(raw_action, path)
+        action_id = _require_nonempty_string(action.get("id"), f"{path}.id")
+        if action_id in action_ids:
+            raise ValueError(f"duplicate action id {action_id}")
+        action_ids.add(action_id)
+        _require_nonempty_string(action.get("label"), f"{path}.label")
+        _require_nonempty_string(action.get("recurrence"), f"{path}.recurrence")
+
+        targets = action.get("scenarios")
+        if not isinstance(targets, list) or not targets:
+            raise ValueError(f"{path}.scenarios must be a nonempty list")
+        if any(not isinstance(target, str) or target not in scenario_period_ids for target in targets):
+            raise ValueError(f"{path}.scenarios must contain known scenario names")
+        if len(set(targets)) != len(targets):
+            raise ValueError(f"{path}.scenarios must not contain duplicates")
+
+        start_period = _require_nonempty_string(action.get("start_period"), f"{path}.start_period")
+        end_period = _require_nonempty_string(action.get("end_period"), f"{path}.end_period")
+        for target in targets:
+            ids = scenario_period_ids[target]
+            if start_period not in ids or end_period not in ids:
+                raise ValueError(f"{path} start_period and end_period must exist in scenario {target}")
+            if ids.index(start_period) > ids.index(end_period):
+                raise ValueError(f"{path} start_period must not follow end_period")
+
+        adjustment_count = 0
+        for field in ("cash_effects", "implementation_costs"):
+            adjustments = action.get(field)
+            if not isinstance(adjustments, list):
+                raise ValueError(f"{path}.{field} must be a list")
+            period_ids_seen: set[str] = set()
+            for adjustment_index, raw_adjustment in enumerate(adjustments):
+                adjustment_path = f"{path}.{field} {adjustment_index}"
+                adjustment = _require_object(raw_adjustment, adjustment_path)
+                period_id = _require_nonempty_string(
+                    adjustment.get("period_id"), f"{adjustment_path}.period_id"
+                )
+                if period_id in period_ids_seen:
+                    raise ValueError(f"{path}.{field} has duplicate period_id {period_id}")
+                period_ids_seen.add(period_id)
+                for target in targets:
+                    ids = scenario_period_ids[target]
+                    if period_id not in ids:
+                        raise ValueError(f"{adjustment_path}.period_id must exist in scenario {target}")
+                    if not ids.index(start_period) <= ids.index(period_id) <= ids.index(end_period):
+                        raise ValueError(
+                            f"{adjustment_path}.period_id must fall between start_period and end_period"
+                        )
+                adjustment_currency = adjustment.get("currency", currency)
+                if adjustment_currency != currency:
+                    raise ValueError(f"{adjustment_path}.currency must match top-level currency")
+                if _money_value(adjustment.get("amount"), f"{adjustment_path}.amount") is None:
+                    raise ValueError(f"{adjustment_path}.amount must be known before modeling")
+                adjustment_count += 1
+        if adjustment_count == 0:
+            raise ValueError(f"{path} must contain at least one cash effect or implementation cost")
 
 
 def validate(payload: object) -> dict[str, Any]:
@@ -189,13 +262,14 @@ def validate(payload: object) -> dict[str, Any]:
     if not isinstance(scenarios, list) or not scenarios:
         raise ValueError("scenarios must be a nonempty list")
     scenario_names: set[str] = set()
+    scenario_period_ids: dict[str, list[str]] = {}
     for index, raw_scenario in enumerate(scenarios):
         scenario = _require_object(raw_scenario, f"scenario {index}")
         name = _require_nonempty_string(scenario.get("name"), f"scenario {index}.name")
         if name in scenario_names:
             raise ValueError(f"duplicate scenario name {name}")
         scenario_names.add(name)
-        _validate_periods(
+        scenario_period_ids[name] = _validate_periods(
             scenario.get("periods"),
             scenario_name=name,
             mode=mode,
@@ -206,9 +280,11 @@ def validate(payload: object) -> dict[str, Any]:
         raise ValueError("scenarios must include a base scenario")
 
     _validate_warning_policy(data.get("warning_policy"))
-    actions = data.get("modeled_actions", [])
-    if not isinstance(actions, list):
-        raise ValueError("modeled_actions must be a list")
+    _validate_actions(
+        data.get("modeled_actions", []),
+        scenario_period_ids=scenario_period_ids,
+        currency=currency,
+    )
     return data
 
 
@@ -376,6 +452,88 @@ def _comparison(
     }
 
 
+def _calculate_actions(
+    data: dict[str, Any],
+    *,
+    scenario_results: list[dict[str, object]],
+    opening_available_cash: Decimal | None,
+    minimum_cash_buffer: Decimal | None,
+    as_of: date,
+) -> list[dict[str, object]]:
+    raw_scenarios = {scenario["name"]: scenario for scenario in data["scenarios"]}
+    baselines = {result["name"]: result for result in scenario_results}
+    action_results: list[dict[str, object]] = []
+
+    for action in data.get("modeled_actions", []):
+        gross_cash_effect = sum(
+            (_money_value(item["amount"], f"action {action['id']} cash effect") or Decimal("0"))
+            for item in action["cash_effects"]
+        )
+        implementation_cost = sum(
+            (
+                _money_value(item["amount"], f"action {action['id']} implementation cost")
+                or Decimal("0")
+            )
+            for item in action["implementation_costs"]
+        )
+
+        for scenario_name in action["scenarios"]:
+            baseline = baselines[scenario_name]
+            if baseline["warning_status"] == "indeterminate":
+                adjusted = _indeterminate_scenario(
+                    scenario_name, list(baseline["missing_inputs"])
+                )
+                delta = None
+            else:
+                assert opening_available_cash is not None
+                assert minimum_cash_buffer is not None
+                adjusted_scenario = copy.deepcopy(raw_scenarios[scenario_name])
+                period_map = {period["id"]: period for period in adjusted_scenario["periods"]}
+                for index, effect in enumerate(action["cash_effects"]):
+                    period_map[effect["period_id"]]["movements"].append(
+                        {
+                            "id": f"action-{action['id']}-effect-{index}",
+                            "label": action["label"],
+                            "direction": "inflow",
+                            "amount": copy.deepcopy(effect["amount"]),
+                        }
+                    )
+                for index, cost in enumerate(action["implementation_costs"]):
+                    period_map[cost["period_id"]]["movements"].append(
+                        {
+                            "id": f"action-{action['id']}-cost-{index}",
+                            "label": f"{action['label']} implementation cost",
+                            "direction": "outflow",
+                            "amount": copy.deepcopy(cost["amount"]),
+                        }
+                    )
+                adjusted = calculate_scenario(
+                    adjusted_scenario,
+                    opening_available_cash=opening_available_cash,
+                    minimum_cash_buffer=minimum_cash_buffer,
+                    as_of=as_of,
+                    warning_policy=data.get("warning_policy"),
+                )
+                delta = _comparison(adjusted, baseline, as_of)
+
+            action_results.append(
+                {
+                    "action_id": action["id"],
+                    "label": action["label"],
+                    "scenario": scenario_name,
+                    "start_period": action["start_period"],
+                    "end_period": action["end_period"],
+                    "recurrence": action["recurrence"],
+                    "gross_cash_effect": gross_cash_effect,
+                    "implementation_cost": implementation_cost,
+                    "net_cash_effect": gross_cash_effect - implementation_cost,
+                    "adjusted": adjusted,
+                    "delta": delta,
+                }
+            )
+    return action_results
+
+
 def calculate(payload: dict[str, object]) -> dict[str, object]:
     """Validate a runway payload and return calculated results."""
     data = validate(payload)
@@ -420,6 +578,13 @@ def calculate(payload: dict[str, object]) -> dict[str, object]:
     provisional = data["mode"] == "quick" or any(
         result["warning_status"] == "indeterminate" for result in scenario_results
     )
+    action_results = _calculate_actions(
+        data,
+        scenario_results=scenario_results,
+        opening_available_cash=opening_available_cash,
+        minimum_cash_buffer=minimum_cash_buffer,
+        as_of=as_of,
+    )
     return {
         "mode": data["mode"],
         "as_of_date": data["as_of_date"],
@@ -430,7 +595,7 @@ def calculate(payload: dict[str, object]) -> dict[str, object]:
         "missing_core_inputs": core_missing,
         "warning_status": base["warning_status"],
         "scenarios": scenario_results,
-        "modeled_actions": [],
+        "modeled_actions": action_results,
     }
 
 
