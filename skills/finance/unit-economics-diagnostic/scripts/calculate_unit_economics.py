@@ -9,7 +9,7 @@ import math
 import re
 import sys
 from datetime import date
-from decimal import Decimal
+from decimal import ROUND_CEILING, Decimal
 from typing import Any
 
 EVIDENCE_STATES = {"confirmed", "reported", "estimated", "unknown"}
@@ -99,7 +99,13 @@ def scalar_value(
     return number
 
 
-def _validate_drivers(value: object, path: str, currency: str) -> None:
+def _validate_drivers(
+    value: object,
+    path: str,
+    currency: str,
+    *,
+    unit_is_discrete: bool,
+) -> None:
     drivers = _require_object(value, path)
     keys = set(drivers)
     if not REQUIRED_DRIVERS <= keys:
@@ -110,7 +116,11 @@ def _validate_drivers(value: object, path: str, currency: str) -> None:
         raise ValueError(f"{path} has unsupported drivers: {', '.join(sorted(unexpected))}")
     for field in ("price_per_unit", "cogs_per_unit", "other_variable_cost_per_unit", "fixed_costs"):
         money_value(drivers[field], f"{path}.{field}", currency)
-    scalar_value(drivers["volume_units"], f"{path}.volume_units")
+    scalar_value(
+        drivers["volume_units"],
+        f"{path}.volume_units",
+        integer=unit_is_discrete,
+    )
     scalar_value(drivers["new_customers"], f"{path}.new_customers", integer=True)
     if "units_per_customer_per_period" in drivers:
         scalar_value(
@@ -118,7 +128,11 @@ def _validate_drivers(value: object, path: str, currency: str) -> None:
             f"{path}.units_per_customer_per_period",
         )
     if "capacity_units" in drivers:
-        scalar_value(drivers["capacity_units"], f"{path}.capacity_units")
+        scalar_value(
+            drivers["capacity_units"],
+            f"{path}.capacity_units",
+            integer=unit_is_discrete,
+        )
 
 
 def _validate_acquisition(value: object, path: str, currency: str) -> None:
@@ -202,10 +216,16 @@ def _validate_scenario(
     mode: str,
     analysis_period: str,
     currency: str,
+    unit_is_discrete: bool,
 ) -> str:
     scenario = _require_object(value, path)
     name = _require_nonempty_string(scenario.get("name"), f"{path}.name")
-    _validate_drivers(scenario.get("drivers"), f"scenario {name}.drivers", currency)
+    _validate_drivers(
+        scenario.get("drivers"),
+        f"scenario {name}.drivers",
+        currency,
+        unit_is_discrete=unit_is_discrete,
+    )
     _validate_acquisition(scenario.get("acquisition"), f"scenario {name}.acquisition", currency)
     _validate_ltv_model(
         scenario.get("ltv_model"),
@@ -260,6 +280,7 @@ def validate(payload: object) -> dict[str, Any]:
             mode=mode,
             analysis_period=analysis_period,
             currency=currency,
+            unit_is_discrete=data["unit_is_discrete"],
         )
         if name in names:
             raise ValueError(f"duplicate scenario name {name}")
@@ -273,12 +294,191 @@ def validate(payload: object) -> dict[str, Any]:
     return data
 
 
+def _input_quality(value: object, path: str = "") -> tuple[list[str], bool]:
+    missing: list[str] = []
+    estimate_based = False
+    if isinstance(value, dict):
+        if value.get("evidence") in EVIDENCE_STATES:
+            estimate_based = value.get("evidence") == "estimated"
+            raw = value.get("amount", value.get("value"))
+            if value.get("evidence") == "unknown" and raw is None:
+                missing.append(path)
+        else:
+            for key, child in value.items():
+                child_path = f"{path}.{key}" if path else key
+                child_missing, child_estimate = _input_quality(child, child_path)
+                missing.extend(child_missing)
+                estimate_based = estimate_based or child_estimate
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            child_missing, child_estimate = _input_quality(child, f"{path}[{index}]")
+            missing.extend(child_missing)
+            estimate_based = estimate_based or child_estimate
+    return missing, estimate_based
+
+
+def _known(*values: Decimal | None) -> bool:
+    return all(value is not None for value in values)
+
+
+def calculate_scenario(
+    scenario: dict[str, object],
+    *,
+    mode: str,
+    analysis_period: str,
+    currency: str,
+    unit_is_discrete: bool,
+) -> dict[str, object]:
+    drivers = scenario["drivers"]
+    price = money_value(drivers["price_per_unit"], "drivers.price_per_unit", currency)
+    cogs = money_value(drivers["cogs_per_unit"], "drivers.cogs_per_unit", currency)
+    variable = money_value(
+        drivers["other_variable_cost_per_unit"],
+        "drivers.other_variable_cost_per_unit",
+        currency,
+    )
+    volume = scalar_value(drivers["volume_units"], "drivers.volume_units")
+    fixed = money_value(drivers["fixed_costs"], "drivers.fixed_costs", currency)
+    capacity = (
+        scalar_value(drivers["capacity_units"], "drivers.capacity_units")
+        if "capacity_units" in drivers
+        else None
+    )
+
+    gross_profit: Decimal | str = price - cogs if _known(price, cogs) else "indeterminate"
+    contribution: Decimal | str = (
+        price - cogs - variable if _known(price, cogs, variable) else "indeterminate"
+    )
+    if price is None or not isinstance(gross_profit, Decimal):
+        gross_margin: Decimal | str = "indeterminate"
+    elif price == 0:
+        gross_margin = "indeterminate_zero_price"
+    else:
+        gross_margin = gross_profit / price
+    if price is None or not isinstance(contribution, Decimal):
+        contribution_margin: Decimal | str = "indeterminate"
+    elif price == 0:
+        contribution_margin = "indeterminate_zero_price"
+    else:
+        contribution_margin = contribution / price
+
+    revenue: Decimal | str = price * volume if _known(price, volume) else "indeterminate"
+    total_gross: Decimal | str = (
+        gross_profit * volume
+        if isinstance(gross_profit, Decimal) and volume is not None
+        else "indeterminate"
+    )
+    total_contribution: Decimal | str = (
+        contribution * volume
+        if isinstance(contribution, Decimal) and volume is not None
+        else "indeterminate"
+    )
+    after_fixed: Decimal | str = (
+        total_contribution - fixed
+        if isinstance(total_contribution, Decimal) and fixed is not None
+        else "indeterminate"
+    )
+
+    if not isinstance(contribution, Decimal) or fixed is None:
+        break_even_units: Decimal | str = "indeterminate"
+        units_ceiling: int | str = "indeterminate"
+        break_even_revenue: Decimal | str = "indeterminate"
+        capacity_status = "unassessed"
+    elif contribution <= 0:
+        break_even_units = "no_finite_break_even"
+        units_ceiling = "no_finite_break_even"
+        break_even_revenue = "no_finite_break_even"
+        capacity_status = "no_finite_break_even"
+    else:
+        break_even_units = fixed / contribution
+        units_ceiling = (
+            int(break_even_units.to_integral_value(rounding=ROUND_CEILING))
+            if unit_is_discrete
+            else "not_applicable_continuous_unit"
+        )
+        break_even_revenue = break_even_units * price if price is not None else "indeterminate"
+        if "capacity_units" not in drivers or capacity is None:
+            capacity_status = "unassessed"
+        else:
+            required = Decimal(units_ceiling) if unit_is_discrete else break_even_units
+            capacity_status = "beyond_capacity" if required > capacity else "within_capacity"
+
+    minimum_positive_price: Decimal | str = (
+        cogs + variable if _known(cogs, variable) else "indeterminate"
+    )
+    maximum_variable_cost: Decimal | str = (
+        max(Decimal("0"), price - cogs) if _known(price, cogs) else "indeterminate"
+    )
+    if not _known(cogs, variable, fixed, volume):
+        minimum_break_even_price: Decimal | str = "indeterminate"
+    elif volume == 0:
+        minimum_break_even_price = "indeterminate_zero_volume"
+    else:
+        minimum_break_even_price = cogs + variable + fixed / volume
+
+    missing_inputs, estimate_based = _input_quality(scenario)
+    return {
+        "name": scenario["name"],
+        "mode": mode,
+        "analysis_period": analysis_period,
+        "estimate_based": estimate_based,
+        "missing_inputs": missing_inputs,
+        "unit_economics": {
+            "price_per_unit": price,
+            "gross_profit_per_unit": gross_profit,
+            "gross_margin": gross_margin,
+            "contribution_profit_per_unit": contribution,
+            "contribution_margin": contribution_margin,
+        },
+        "period_economics": {
+            "volume_units": volume,
+            "revenue": revenue,
+            "total_gross_profit": total_gross,
+            "total_contribution_profit": total_contribution,
+            "fixed_costs": fixed,
+            "contribution_after_fixed_costs": after_fixed,
+        },
+        "break_even": {
+            "units": break_even_units,
+            "units_ceiling": units_ceiling,
+            "revenue": break_even_revenue,
+            "capacity_units": capacity,
+            "capacity_status": capacity_status,
+        },
+        "breakpoints": {
+            "minimum_price_for_positive_contribution": minimum_positive_price,
+            "minimum_price_for_break_even_at_current_volume": minimum_break_even_price,
+            "maximum_variable_cost_for_positive_contribution": maximum_variable_cost,
+        },
+        "cac": {},
+        "customer_economics": {},
+        "diagnostic_flags": [],
+        "comparison_to_base": None,
+    }
+
+
 def calculate(payload: dict[str, object]) -> dict[str, object]:
     data = validate(payload)
+    scenario_results = [
+        calculate_scenario(
+            scenario,
+            mode=data["mode"],
+            analysis_period=data["analysis_period"],
+            currency=data["currency"],
+            unit_is_discrete=data["unit_is_discrete"],
+        )
+        for scenario in data["scenarios"]
+    ]
     return {
         "mode": data["mode"],
         "as_of_date": data["as_of_date"],
         "currency": data["currency"],
+        "analysis_period": data["analysis_period"],
+        "unit_name": data["unit_name"],
+        "unit_is_discrete": data["unit_is_discrete"],
+        "revenue_basis": data["revenue_basis"],
+        "scenarios": scenario_results,
+        "sensitivity_cases": [],
     }
 
 
