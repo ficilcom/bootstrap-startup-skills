@@ -50,6 +50,12 @@ Skill directories live one level below a category. The skill directory name and 
 | `operations` | Processes, automation, vendors, and operating efficiency |
 | `management` | Founder reviews, decision systems, planning, and organizational cadence |
 
+## Available skills
+
+| Skill | Description |
+| --- | --- |
+| [`bank-loan-readiness`](skills/finance/bank-loan-readiness/) | Assess application readiness for Japanese startup and operating-company loans, identify weaknesses, and prioritize improvements. |
+
 ## Install
 
 List the available skills:
@@ -63,6 +69,15 @@ Install one skill globally for Codex:
 ```bash
 npx skills add ficilcom/bootstrap-startup-skills \
   --skill <skill-name> \
+  --agent codex \
+  --global
+```
+
+Install `bank-loan-readiness` globally for Codex:
+
+```bash
+npx skills add ficilcom/bootstrap-startup-skills \
+  --skill bank-loan-readiness \
   --agent codex \
   --global
 ```
