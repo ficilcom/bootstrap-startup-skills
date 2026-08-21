@@ -59,3 +59,26 @@ After implementing the module, the same focused command passed all eight tests (
 ## Concerns
 
 - `python3 -m unittest discover -v` does not discover tests in this scaffold (0 tests, exit 5); the explicitly required focused command passes all eight tests.
+
+## Fix Round 1
+
+### What changed
+
+- Unknown-evidence criteria now contribute zero criterion points regardless of their supplied rating.
+- Criterion points, raw score, confidence percentage, and final score now use one-decimal-place arithmetic.
+- Added coverage for a nonzero rating with unknown evidence and for fractional one-decimal rounding.
+
+### Covering tests and exact results
+
+The new test-first command initially failed as expected: the unknown-evidence case returned `raw_score` 100.0 instead of 80.0, and the fractional case returned 6.17 instead of 6.2.
+
+```text
+python3 -m unittest tests/test_calculate_score.py -v
+Ran 9 tests in 0.036s
+OK
+```
+
+```text
+python3 scripts/validate_skills.py
+No skills found yet; repository scaffold is valid.
+```

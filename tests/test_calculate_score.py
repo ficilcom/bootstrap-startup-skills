@@ -72,11 +72,17 @@ class CalculateScoreTests(unittest.TestCase):
 
     def test_unknown_core_criterion_is_zero_and_provisional(self) -> None:
         payload = startup_payload()
-        payload["criteria"]["funding_plan"] = {"rating": 0, "evidence": "unknown"}
+        payload["criteria"]["funding_plan"] = {"rating": 5, "evidence": "unknown"}
         result = score_module.calculate(payload)
         self.assertEqual(result["raw_score"], 80.0)
+        self.assertEqual(result["criterion_points"]["funding_plan"], 0.0)
         self.assertTrue(result["provisional"])
         self.assertEqual(result["missing_core_criteria"], ["funding_plan"])
+
+    def test_scores_are_rounded_to_one_decimal_place(self) -> None:
+        result = score_module.calculate(startup_payload(rating=1.234))
+        self.assertEqual(result["criterion_points"]["business_plan"], 6.2)
+        self.assertEqual(result["raw_score"], 24.7)
 
     def test_rejects_incomplete_criteria(self) -> None:
         payload = startup_payload()

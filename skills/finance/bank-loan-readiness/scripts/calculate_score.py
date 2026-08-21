@@ -93,17 +93,30 @@ def calculate(payload: dict[str, object]) -> dict[str, object]:
     config, criteria, flags = _validate(payload)
     weights = config["weights"]
     criterion_points = {
-        name: round(weight * float(entry["rating"]) / 5, 2)
+        name: round(
+            weight * float(entry["rating"]) / 5
+            if entry["evidence"] != "unknown"
+            else 0.0,
+            1,
+        )
         for name, (weight, entry) in ((name, (weights[name], criteria[name])) for name in weights)
     }
-    raw_score = round(sum(criterion_points.values()), 2)
+    raw_score = round(
+        sum(
+            weights[name] * float(criteria[name]["rating"]) / 5
+            if criteria[name]["evidence"] != "unknown"
+            else 0.0
+            for name in weights
+        ),
+        1,
+    )
     confidence_percent = round(
-        sum(weights[name] * EVIDENCE_FACTORS[criteria[name]["evidence"]] for name in weights), 2
+        sum(weights[name] * EVIDENCE_FACTORS[criteria[name]["evidence"]] for name in weights), 1
     )
     missing = sorted(name for name in config["core"] if criteria[name]["evidence"] == "unknown")
     provisional = confidence_percent < 60 or bool(missing)
     applied_cap = min((CAPS[flag["severity"]] for flag in flags), default=None)
-    final_score = round(min(raw_score, applied_cap) if applied_cap is not None else raw_score, 2)
+    final_score = round(min(raw_score, applied_cap) if applied_cap is not None else raw_score, 1)
     return {
         "mode": payload["mode"],
         "raw_score": raw_score,
