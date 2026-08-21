@@ -56,6 +56,7 @@ Skill directories live one level below a category. The skill directory name and 
 | --- | --- |
 | [`bank-loan-readiness`](skills/finance/bank-loan-readiness/) | Assess application readiness for Japanese startup and operating-company loans, identify weaknesses, and prioritize improvements. |
 | [`cash-runway-planner`](skills/finance/cash-runway-planner/) | Build a cash-basis 13-week forecast and 12-month runway, compare downside scenarios, and prioritize dated actions before cash or an operating buffer runs short. |
+| [`unit-economics-diagnostic`](skills/finance/unit-economics-diagnostic/) | Diagnose contribution economics, CAC recovery, defensible LTV, feasible break-even volume, and decision-changing sensitivities across recurring, transactional, and service-project businesses. |
 
 ## Install
 
