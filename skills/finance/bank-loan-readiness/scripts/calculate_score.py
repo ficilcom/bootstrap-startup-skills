@@ -40,6 +40,16 @@ MODE_CONFIG = {
 
 EVIDENCE_FACTORS = {"confirmed": 1.0, "reported": 0.6, "inferred": 0.3, "unknown": 0.0}
 CAPS = {"major": 59, "critical": 39}
+RED_FLAG_SEVERITIES = {
+    "current_serious_delinquency": {"critical"},
+    "material_misrepresentation": {"critical"},
+    "ineligible_or_illegal_use": {"critical"},
+    "missing_required_license": {"major", "critical"},
+    "tax_or_social_insurance_arrears": {"major"},
+    "unsupported_debt_service": {"major"},
+    "unexplained_material_inconsistency": {"major"},
+    "unclear_use_of_funds": {"major"},
+}
 
 
 def readiness_band(score: float) -> str:
@@ -69,8 +79,8 @@ def _validate(payload: dict[str, object]) -> tuple[dict[str, Any], dict[str, Any
         if not isinstance(entry, dict):
             raise ValueError(f"criterion {name} must be an object")
         rating = entry.get("rating")
-        if isinstance(rating, bool) or not isinstance(rating, (int, float)) or not 0 <= rating <= 5:
-            raise ValueError(f"criterion {name} rating must be a number from 0 through 5")
+        if isinstance(rating, bool) or not isinstance(rating, int) or not 0 <= rating <= 5:
+            raise ValueError(f"criterion {name} rating must be an integer from 0 through 5")
         evidence = entry.get("evidence")
         if evidence not in EVIDENCE_FACTORS:
             raise ValueError(f"criterion {name} evidence must be known")
@@ -80,9 +90,12 @@ def _validate(payload: dict[str, object]) -> tuple[dict[str, Any], dict[str, Any
     for index, flag in enumerate(flags):
         if not isinstance(flag, dict):
             raise ValueError(f"red flag {index} must be an object")
+        code = flag.get("code")
+        if not isinstance(code, str) or not code or code not in RED_FLAG_SEVERITIES:
+            raise ValueError(f"red flag {index} code must be a known nonempty string")
         severity = flag.get("severity")
-        if severity not in CAPS:
-            raise ValueError(f"red flag {index} severity must be known")
+        if severity not in RED_FLAG_SEVERITIES[code]:
+            raise ValueError(f"red flag {index} severity must match the catalog for {code}")
         evidence = flag.get("evidence")
         if evidence not in {"confirmed", "reported"}:
             raise ValueError(f"red flag evidence must be confirmed or reported (red flag {index})")
@@ -94,22 +107,14 @@ def calculate(payload: dict[str, object]) -> dict[str, object]:
     weights = config["weights"]
     criterion_points = {
         name: round(
-            weight * float(entry["rating"]) / 5
+            weight * entry["rating"] / 5
             if entry["evidence"] != "unknown"
             else 0.0,
             1,
         )
         for name, (weight, entry) in ((name, (weights[name], criteria[name])) for name in weights)
     }
-    raw_score = round(
-        sum(
-            weights[name] * float(criteria[name]["rating"]) / 5
-            if criteria[name]["evidence"] != "unknown"
-            else 0.0
-            for name in weights
-        ),
-        1,
-    )
+    raw_score = round(sum(criterion_points.values()), 1)
     confidence_percent = round(
         sum(weights[name] * EVIDENCE_FACTORS[criteria[name]["evidence"]] for name in weights), 1
     )

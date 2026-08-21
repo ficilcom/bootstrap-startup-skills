@@ -23,7 +23,7 @@ metadata:
    - `startup` は [スタートアップ・ルーブリック](references/startup-rubric.md)。
    - `operating_company` は [事業継続会社ルーブリック](references/operating-company-rubric.md)。
    - 選択していないモードのルーブリックは読まない。
-4. 選択モードの全評価項目を正規化する。各項目に `rating`（0–5）、`evidence`、短い根拠、評価理由を残す。`unknown` は不明な理由と確認質問を残し、低評点や赤旗に置き換えない。確認済みまたは本人申告済みの重大懸念だけを赤旗候補にし、`inferred` と `unknown` の懸念は未解決事項に残す。
+4. 選択モードの全評価項目を正規化する。各項目に `rating`（0–5 の整数）、`evidence`、短い根拠、評価理由を残す。`unknown` は不明な理由と確認質問を残し、低評点や赤旗に置き換えない。確認済みまたは本人申告済みの重大懸念だけを赤旗候補にし、`inferred` と `unknown` の懸念は未解決事項に残す。
 5. スコアラー用には、スキルのディレクトリ外に、必要最小限の匿名化した JSON ファイルを作る。全評価項目の `rating` と `evidence`、および該当する `confirmed` / `reported` 赤旗だけを含める。
 
    ```json

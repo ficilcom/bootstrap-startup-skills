@@ -62,7 +62,7 @@ Permitted severities are `major` and `critical`; permitted red-flag evidence val
 
 ### `unsupported_debt_service` — major
 
-**Use when:** confirmed or reported cash-flow information indicates existing plus requested debt service is unsupported, or the claim of coverage lacks the necessary underlying support.
+**Use when:** confirmed or reported cash-flow evidence shows that existing plus requested debt service cannot be covered, or the applicant confirms that no substantive repayment basis or model exists. Unavailable support documents alone remain `unknown` and unresolved; they do not establish this flag.
 
 **Why it matters:** a request without plausible debt-service capacity is not loan-ready.
 

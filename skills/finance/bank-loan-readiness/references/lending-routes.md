@@ -4,9 +4,9 @@
 
 具体的な制度名、条件、必要書類、取扱可否を述べるときは、必ず最新の公式情報を確認する。まず次の安定した公式資料を参照し、所在地・業種・資金使途に関わる主張は該当する信用保証協会と金融機関の公式ページでも確認する。
 
-- [日本政策金融公庫: 創業計画書に関するQ&A](https://www.jfc.go.jp/n/finance/sougyou/sougyou02.html)
-- [日本政策金融公庫: 創業計画セルフチェック](https://www.jfc.go.jp/n/finance/sougyou/sougyouselfchek/page_3/)
-- [東京信用保証協会: ディスクロージャー資料](https://www.cgc-tokyo.or.jp/about/profile/disclosure.files/cgc_tokyo2025.pdf)
+- [日本政策金融公庫: 創業計画の書き方](https://www.jfc.go.jp/n/finance/sougyou/business-plan/)
+- [日本政策金融公庫: 創業計画書セルフチェック](https://www.jfc.go.jp/n/finance/sougyou/sougyouselfchek/)
+- [東京信用保証協会: ディスクロージャー誌](https://www.cgc-tokyo.or.jp/about/profile/disclosure.html)
 - [金融庁: キャッシュフローを重視した経営者保証に依存しない融資等](https://www.fsa.go.jp/access/r7/274.html)
 
 ## 比較の前提
