@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import math
 import re
@@ -246,6 +247,51 @@ def _validate_scenario(
     return name
 
 
+def _allowed_sensitivity_paths(source: dict[str, object]) -> set[str]:
+    paths = {
+        *(f"drivers.{field}" for field in REQUIRED_DRIVERS | OPTIONAL_DRIVERS),
+        *(f"acquisition.costs.{basis}" for basis in CAC_BASES),
+        "acquisition.marginal_new_customers",
+        "targets.max_payback_periods",
+    }
+    method = source["ltv_model"]["method"]
+    if method == "constant_retention":
+        paths.add("ltv_model.churn_rate_per_period")
+    elif method == "fixed_horizon":
+        paths.update(
+            {
+                "ltv_model.expected_units_per_customer_within_horizon",
+                "ltv_model.horizon_periods",
+            }
+        )
+    else:
+        paths.update(
+            {
+                "ltv_model.cohort_customers",
+                "ltv_model.contribution_totals_by_period",
+            }
+        )
+    return paths
+
+
+def _apply_overrides(
+    source: dict[str, object],
+    overrides: dict[str, object],
+) -> dict[str, object]:
+    result = copy.deepcopy(source)
+    for path, replacement in overrides.items():
+        parts = path.split(".")
+        current: dict[str, object] = result
+        for part in parts[:-1]:
+            child = current.get(part)
+            if child is None:
+                child = {}
+                current[part] = child
+            current = _require_object(child, path)
+        current[parts[-1]] = copy.deepcopy(replacement)
+    return result
+
+
 def validate(payload: object) -> dict[str, Any]:
     data = _require_object(payload, "payload")
     mode = data.get("mode")
@@ -273,6 +319,7 @@ def validate(payload: object) -> dict[str, Any]:
     if not isinstance(scenarios, list) or not scenarios:
         raise ValueError("scenarios must be a nonempty list")
     names: set[str] = set()
+    scenarios_by_name: dict[str, dict[str, object]] = {}
     for index, scenario in enumerate(scenarios):
         name = _validate_scenario(
             scenario,
@@ -285,12 +332,49 @@ def validate(payload: object) -> dict[str, Any]:
         if name in names:
             raise ValueError(f"duplicate scenario name {name}")
         names.add(name)
+        scenarios_by_name[name] = scenario
     if "base" not in names:
         raise ValueError("scenarios must include base")
 
     sensitivity_cases = data.get("sensitivity_cases", [])
     if not isinstance(sensitivity_cases, list):
         raise ValueError("sensitivity_cases must be a list")
+    sensitivity_names: set[str] = set()
+    for index, raw_case in enumerate(sensitivity_cases):
+        case = _require_object(raw_case, f"sensitivity case {index}")
+        unexpected = set(case) - {"name", "source_scenario", "overrides"}
+        if unexpected:
+            raise ValueError(
+                f"sensitivity case {index} contains unsupported fields: "
+                f"{', '.join(sorted(unexpected))}"
+            )
+        name = _require_nonempty_string(case.get("name"), f"sensitivity case {index}.name")
+        if name in sensitivity_names:
+            raise ValueError(f"duplicate sensitivity name {name}")
+        sensitivity_names.add(name)
+        source_name = _require_nonempty_string(
+            case.get("source_scenario"),
+            f"sensitivity case {name}.source_scenario",
+        )
+        if source_name not in scenarios_by_name:
+            raise ValueError(f"sensitivity case {name} references unknown source scenario")
+        overrides = _require_object(case.get("overrides"), f"sensitivity case {name}.overrides")
+        if not overrides:
+            raise ValueError(f"sensitivity case {name}.overrides must not be empty")
+        allowed_paths = _allowed_sensitivity_paths(scenarios_by_name[source_name])
+        for path in overrides:
+            if path not in allowed_paths:
+                raise ValueError(f"unsupported sensitivity override path {path}")
+        modified = _apply_overrides(scenarios_by_name[source_name], overrides)
+        modified["name"] = name
+        _validate_scenario(
+            modified,
+            f"sensitivity case {name}",
+            mode=mode,
+            analysis_period=analysis_period,
+            currency=currency,
+            unit_is_discrete=data["unit_is_discrete"],
+        )
     return data
 
 
@@ -757,6 +841,54 @@ def calculate_scenario(
     }
 
 
+def _decision_metrics(result: dict[str, object]) -> dict[str, object]:
+    return {
+        "gross_profit_per_unit": result["unit_economics"]["gross_profit_per_unit"],
+        "gross_margin": result["unit_economics"]["gross_margin"],
+        "contribution_profit_per_unit": result["unit_economics"][
+            "contribution_profit_per_unit"
+        ],
+        "contribution_margin": result["unit_economics"]["contribution_margin"],
+        "revenue": result["period_economics"]["revenue"],
+        "contribution_after_fixed_costs": result["period_economics"][
+            "contribution_after_fixed_costs"
+        ],
+        "break_even_units": result["break_even"]["units"],
+        "break_even_revenue": result["break_even"]["revenue"],
+        "selected_cac": result["cac"]["selected_cac"],
+        "customer_contribution_per_period": result["customer_economics"][
+            "contribution_per_period"
+        ],
+        "payback_periods": result["customer_economics"]["payback_periods"],
+        "ltv": result["customer_economics"]["ltv"],
+        "ltv_to_cac": result["customer_economics"]["ltv_to_cac"],
+    }
+
+
+def _is_numeric(value: object) -> bool:
+    return isinstance(value, (int, Decimal)) and not isinstance(value, bool)
+
+
+def _compare_results(
+    result: dict[str, object],
+    source: dict[str, object],
+) -> dict[str, object]:
+    result_metrics = _decision_metrics(result)
+    source_metrics = _decision_metrics(source)
+    deltas = {
+        key: result_metrics[key] - source_metrics[key]
+        for key in result_metrics
+        if _is_numeric(result_metrics[key]) and _is_numeric(source_metrics[key])
+    }
+    result_flags = set(result["diagnostic_flags"])
+    source_flags = set(source["diagnostic_flags"])
+    return {
+        "deltas": deltas,
+        "added_flags": sorted(result_flags - source_flags),
+        "removed_flags": sorted(source_flags - result_flags),
+    }
+
+
 def calculate(payload: dict[str, object]) -> dict[str, object]:
     data = validate(payload)
     scenario_results = [
@@ -769,6 +901,34 @@ def calculate(payload: dict[str, object]) -> dict[str, object]:
         )
         for scenario in data["scenarios"]
     ]
+    results_by_name = {result["name"]: result for result in scenario_results}
+    base_result = results_by_name["base"]
+    for result in scenario_results:
+        if result["name"] != "base":
+            result["comparison_to_base"] = _compare_results(result, base_result)
+
+    sensitivity_results: list[dict[str, object]] = []
+    source_scenarios = {scenario["name"]: scenario for scenario in data["scenarios"]}
+    for case in data.get("sensitivity_cases", []):
+        source_name = case["source_scenario"]
+        modified = _apply_overrides(source_scenarios[source_name], case["overrides"])
+        modified["name"] = case["name"]
+        case_result = calculate_scenario(
+            modified,
+            mode=data["mode"],
+            analysis_period=data["analysis_period"],
+            currency=data["currency"],
+            unit_is_discrete=data["unit_is_discrete"],
+        )
+        source_result = results_by_name[source_name]
+        comparison = _compare_results(case_result, source_result)
+        case_result["source_scenario"] = source_name
+        case_result["deltas"] = comparison["deltas"]
+        case_result["added_flags"] = comparison["added_flags"]
+        case_result["removed_flags"] = comparison["removed_flags"]
+        if source_name != "base":
+            case_result["comparison_to_base"] = _compare_results(case_result, base_result)
+        sensitivity_results.append(case_result)
     return {
         "mode": data["mode"],
         "as_of_date": data["as_of_date"],
@@ -778,7 +938,7 @@ def calculate(payload: dict[str, object]) -> dict[str, object]:
         "unit_is_discrete": data["unit_is_discrete"],
         "revenue_basis": data["revenue_basis"],
         "scenarios": scenario_results,
-        "sensitivity_cases": [],
+        "sensitivity_cases": sensitivity_results,
     }
 
 

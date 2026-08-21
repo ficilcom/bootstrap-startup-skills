@@ -11,6 +11,7 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import patch
 
 from calculate_unit_economics import calculate, main
 
@@ -443,6 +444,151 @@ class DiagnosticTests(unittest.TestCase):
         result = calculate(payload)["scenarios"][0]["breakpoints"]
         self.assertEqual(result["maximum_constant_churn_for_ltv_equal_cac"], 1)
         self.assertEqual(result["maximum_constant_churn_constraint"], "clamped_to_one")
+
+
+class ScenarioAndSensitivityTests(unittest.TestCase):
+    def test_scenario_comparison_reports_decision_metric_deltas(self) -> None:
+        payload = recurring_payload()
+        downside = copy.deepcopy(payload["scenarios"][0])
+        downside["name"] = "downside"
+        downside["drivers"]["price_per_unit"] = money(8_000, "estimated")
+        downside["acquisition"]["costs"]["fully_loaded"] = money(900_000, "estimated")
+        payload["scenarios"].append(downside)
+
+        result = calculate(payload)["scenarios"][1]
+
+        self.assertEqual(result["unit_economics"]["contribution_profit_per_unit"], 4_500)
+        self.assertEqual(result["cac"]["selected_cac"], 30_000)
+        self.assertEqual(result["comparison_to_base"]["deltas"]["contribution_profit_per_unit"], -4_000)
+        self.assertEqual(result["comparison_to_base"]["deltas"]["selected_cac"], 10_000)
+        self.assertIn("profitable_to_scale", result["comparison_to_base"]["removed_flags"])
+
+    def test_sensitivity_cases_recalculate_independently(self) -> None:
+        payload = recurring_payload()
+        payload["sensitivity_cases"] = [
+            {
+                "name": "price-down-and-cogs-up",
+                "source_scenario": "base",
+                "overrides": {
+                    "drivers.price_per_unit": money(10_800, "estimated"),
+                    "drivers.cogs_per_unit": money(3_000, "estimated"),
+                },
+            },
+            {
+                "name": "cogs-only",
+                "source_scenario": "base",
+                "overrides": {
+                    "drivers.cogs_per_unit": money(3_000, "estimated"),
+                },
+            },
+        ]
+
+        cases = calculate(payload)["sensitivity_cases"]
+
+        self.assertEqual(cases[0]["source_scenario"], "base")
+        self.assertEqual(cases[0]["unit_economics"]["contribution_profit_per_unit"], 6_800)
+        self.assertIn("contribution_profit_per_unit", cases[0]["deltas"])
+        self.assertEqual(cases[1]["unit_economics"]["contribution_profit_per_unit"], 8_000)
+
+    def test_sensitivity_reports_added_and_removed_flags(self) -> None:
+        payload = recurring_payload()
+        payload["sensitivity_cases"] = [
+            {
+                "name": "capacity-crunch",
+                "source_scenario": "base",
+                "overrides": {"drivers.capacity_units": scalar(100, "estimated")},
+            }
+        ]
+
+        case = calculate(payload)["sensitivity_cases"][0]
+
+        self.assertIn("break_even_beyond_capacity", case["added_flags"])
+        self.assertIn("profitable_to_scale", case["removed_flags"])
+
+    def test_observed_cohort_list_can_be_overridden(self) -> None:
+        payload = recurring_payload()
+        payload["scenarios"][0]["ltv_model"] = {
+            "method": "observed_cohort",
+            "cohort_customers": scalar(40),
+            "contribution_totals_by_period": [money(320_000), money(480_000)],
+            "period_unit": "month",
+        }
+        payload["sensitivity_cases"] = [
+            {
+                "name": "cohort-downside",
+                "source_scenario": "base",
+                "overrides": {
+                    "ltv_model.contribution_totals_by_period": [money(200_000), money(200_000)]
+                },
+            }
+        ]
+
+        case = calculate(payload)["sensitivity_cases"][0]
+
+        self.assertEqual(case["customer_economics"]["ltv"], 10_000)
+        self.assertEqual(case["customer_economics"]["payback_periods"], "not_observed_within_horizon")
+        self.assertIn("acquisition_not_recovered", case["added_flags"])
+
+    def test_rejects_structural_sensitivity_override(self) -> None:
+        payload = recurring_payload()
+        payload["sensitivity_cases"] = [
+            {
+                "name": "invalid",
+                "source_scenario": "base",
+                "overrides": {"ltv_model.method": "fixed_horizon"},
+            }
+        ]
+
+        with self.assertRaisesRegex(ValueError, "unsupported sensitivity override path"):
+            calculate(payload)
+
+    def test_rejects_duplicate_sensitivity_names_and_unknown_sources(self) -> None:
+        payload = recurring_payload()
+        case = {
+            "name": "duplicate",
+            "source_scenario": "base",
+            "overrides": {"drivers.price_per_unit": money(10_000, "estimated")},
+        }
+        payload["sensitivity_cases"] = [case, copy.deepcopy(case)]
+        with self.assertRaisesRegex(ValueError, "duplicate sensitivity name"):
+            calculate(payload)
+
+        payload["sensitivity_cases"] = [copy.deepcopy(case)]
+        payload["sensitivity_cases"][0]["source_scenario"] = "missing"
+        with self.assertRaisesRegex(ValueError, "unknown source scenario"):
+            calculate(payload)
+
+
+class CliTests(unittest.TestCase):
+    def test_reads_valid_file_and_prints_compact_json(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            input_path = Path(directory) / "input.json"
+            input_path.write_text(json.dumps(recurring_payload()), encoding="utf-8")
+            stdout = io.StringIO()
+
+            with redirect_stdout(stdout):
+                status = main([str(input_path)])
+
+        self.assertEqual(status, 0)
+        self.assertNotIn("\n ", stdout.getvalue())
+        self.assertEqual(json.loads(stdout.getvalue())["scenarios"][0]["cac"]["selected_cac"], 20_000)
+
+    def test_reads_standard_input(self) -> None:
+        stdout = io.StringIO()
+        with patch("sys.stdin", io.StringIO(json.dumps(recurring_payload()))), redirect_stdout(stdout):
+            status = main(["-"])
+
+        self.assertEqual(status, 0)
+        self.assertEqual(json.loads(stdout.getvalue())["mode"], "recurring")
+
+    def test_malformed_json_and_validation_errors_return_two(self) -> None:
+        for raw in ("{", json.dumps({"mode": "hybrid"})):
+            with self.subTest(raw=raw):
+                stderr = io.StringIO()
+                with patch("sys.stdin", io.StringIO(raw)), redirect_stderr(stderr):
+                    status = main(["-"])
+                self.assertEqual(status, 2)
+                self.assertTrue(stderr.getvalue().startswith("error: "))
 
 
 if __name__ == "__main__":
