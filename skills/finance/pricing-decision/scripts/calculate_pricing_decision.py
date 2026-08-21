@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import math
 import re
@@ -209,6 +210,13 @@ ASSIGNMENT_SCALARS = {
     "variable_cost_multiplier": "scalar",
     "transition_discount_rate": "rate",
 }
+SENSITIVITY_ASSIGNMENT_FIELDS = set(ASSIGNMENT_SCALARS) | {
+    "quoted_charge_per_customer_per_period"
+}
+SENSITIVITY_PROPOSAL_FIELDS = {
+    "incremental_fixed_costs_per_period",
+    "one_time_implementation_costs",
+}
 
 
 def _validate_assignment(
@@ -255,6 +263,41 @@ def _validate_assignment(
             currency,
         )
     return segment
+
+
+def _sensitivity_path(
+    path: str,
+    proposal: dict[str, object],
+) -> tuple[str, str | None]:
+    if path in SENSITIVITY_PROPOSAL_FIELDS:
+        return path, None
+    if not path.startswith("assignments."):
+        raise ValueError(f"unsupported sensitivity override path {path}")
+    remainder = path.removeprefix("assignments.")
+    if "." not in remainder:
+        raise ValueError(f"unsupported sensitivity override path {path}")
+    segment, field = remainder.rsplit(".", 1)
+    if field not in SENSITIVITY_ASSIGNMENT_FIELDS:
+        raise ValueError(f"unsupported sensitivity override path {path}")
+    known_segments = {assignment["segment"] for assignment in proposal["assignments"]}
+    if segment not in known_segments:
+        raise ValueError(f"sensitivity override references unknown segment {segment}")
+    return field, segment
+
+
+def _apply_overrides(
+    source: dict[str, object],
+    overrides: dict[str, object],
+) -> dict[str, object]:
+    result = copy.deepcopy(source)
+    assignments = {assignment["segment"]: assignment for assignment in result["assignments"]}
+    for path, replacement in overrides.items():
+        field, segment = _sensitivity_path(path, source)
+        if segment is None:
+            result[field] = copy.deepcopy(replacement)
+        else:
+            assignments[segment][field] = copy.deepcopy(replacement)
+    return result
 
 
 def validate(payload: object) -> dict[str, Any]:
@@ -321,12 +364,14 @@ def validate(payload: object) -> dict[str, Any]:
     if not isinstance(proposals_input, list) or not proposals_input:
         raise ValueError("proposals must be a nonempty list")
     proposal_names: set[str] = set()
+    proposals_by_name: dict[str, dict[str, object]] = {}
     for index, raw_proposal in enumerate(proposals_input):
         proposal = _require_object(raw_proposal, f"proposal {index}")
         name = _require_nonempty_string(proposal.get("name"), f"proposal {index}.name")
         if name in proposal_names:
             raise ValueError(f"duplicate proposal name {name}")
         proposal_names.add(name)
+        proposals_by_name[name] = proposal
         if proposal.get("validation_stage") not in VALIDATION_STAGES:
             raise ValueError(f"proposal {name}.validation_stage must be supported")
         summary = proposal.get("change_summary")
@@ -363,6 +408,33 @@ def validate(payload: object) -> dict[str, Any]:
     sensitivity_cases = data.get("sensitivity_cases", [])
     if not isinstance(sensitivity_cases, list):
         raise ValueError("sensitivity_cases must be a list")
+    sensitivity_names: set[str] = set()
+    for index, raw_case in enumerate(sensitivity_cases):
+        case = _require_object(raw_case, f"sensitivity case {index}")
+        unexpected = set(case) - {"name", "source_proposal", "overrides"}
+        if unexpected:
+            raise ValueError(f"sensitivity case {index} contains unsupported fields")
+        name = _require_nonempty_string(case.get("name"), f"sensitivity case {index}.name")
+        if name in sensitivity_names:
+            raise ValueError(f"duplicate sensitivity name {name}")
+        sensitivity_names.add(name)
+        source_name = _require_nonempty_string(
+            case.get("source_proposal"), f"sensitivity case {name}.source_proposal"
+        )
+        if source_name not in proposals_by_name:
+            raise ValueError(f"sensitivity case {name} references unknown source proposal")
+        overrides = _require_object(case.get("overrides"), f"sensitivity case {name}.overrides")
+        if not overrides:
+            raise ValueError(f"sensitivity case {name}.overrides must not be empty")
+        source = proposals_by_name[source_name]
+        for path in overrides:
+            _sensitivity_path(path, source)
+        modified = _apply_overrides(source, overrides)
+        modified["name"] = name
+        validation_payload = copy.deepcopy(data)
+        validation_payload["proposals"] = [modified]
+        validation_payload["sensitivity_cases"] = []
+        validate(validation_payload)
     return data
 
 
@@ -1171,10 +1243,52 @@ def calculate_proposal(
     return result
 
 
+def _compare_proposals(
+    result: dict[str, object],
+    source: dict[str, object],
+) -> dict[str, object]:
+    deltas: dict[str, Decimal] = {}
+    for field, value in result["metrics"].items():
+        source_value = source["metrics"].get(field)
+        if _is_numeric(value) and _is_numeric(source_value):
+            deltas[field] = value - source_value
+    result_burden = result["price_burden"]["weighted_average_increase_rate"]
+    source_burden = source["price_burden"]["weighted_average_increase_rate"]
+    if _is_numeric(result_burden) and _is_numeric(source_burden):
+        deltas["weighted_average_price_increase_rate"] = result_burden - source_burden
+    result_violations = {
+        field for field, status in result["guardrails"].items() if status == "violated"
+    }
+    source_violations = {
+        field for field, status in source["guardrails"].items() if status == "violated"
+    }
+    result_reasons = set(result["decision_reasons"])
+    source_reasons = set(source["decision_reasons"])
+    return {
+        "deltas_from_source": deltas,
+        "added_guardrail_violations": sorted(result_violations - source_violations),
+        "removed_guardrail_violations": sorted(source_violations - result_violations),
+        "added_decision_reasons": sorted(result_reasons - source_reasons),
+        "removed_decision_reasons": sorted(source_reasons - result_reasons),
+    }
+
+
 def calculate(payload: dict[str, object]) -> dict[str, object]:
     data = validate(payload)
     current = calculate_current(data)
     proposals = [calculate_proposal(data, proposal, current) for proposal in data["proposals"]]
+    proposals_by_name = {proposal["name"]: proposal for proposal in data["proposals"]}
+    results_by_name = {result["name"]: result for result in proposals}
+    sensitivity_results: list[dict[str, object]] = []
+    for case in data.get("sensitivity_cases", []):
+        source_name = case["source_proposal"]
+        modified = _apply_overrides(proposals_by_name[source_name], case["overrides"])
+        modified["name"] = case["name"]
+        case_result = calculate_proposal(data, modified, current)
+        comparison = _compare_proposals(case_result, results_by_name[source_name])
+        case_result["source_proposal"] = source_name
+        case_result.update(comparison)
+        sensitivity_results.append(case_result)
     return {
         "mode": data["mode"],
         "as_of_date": data["as_of_date"],
@@ -1183,7 +1297,7 @@ def calculate(payload: dict[str, object]) -> dict[str, object]:
         "usage_unit_name": data["usage_unit_name"],
         "current": current,
         "proposals": proposals,
-        "sensitivity_cases": [],
+        "sensitivity_cases": sensitivity_results,
     }
 
 

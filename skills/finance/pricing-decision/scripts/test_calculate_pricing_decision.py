@@ -578,6 +578,148 @@ class DecisionTests(unittest.TestCase):
 
         self.assertEqual(result["guardrails"], {})
         self.assertEqual(result["decision_status"], "pilot_first")
+
+
+class SensitivityTests(unittest.TestCase):
+    def test_rejects_invalid_sensitivity_cases(self) -> None:
+        base_case = {
+            "name": "retention-downside",
+            "source_proposal": "higher-flat-price",
+            "overrides": {
+                "assignments.small-teams.retention_rate_after_migration": scalar(0.82, "estimated")
+            },
+        }
+        payload = recurring_payload()
+        payload["sensitivity_cases"] = [base_case, copy.deepcopy(base_case)]
+        with self.assertRaisesRegex(ValueError, "duplicate sensitivity name"):
+            calculate(payload)
+
+        payload = recurring_payload()
+        payload["sensitivity_cases"] = [copy.deepcopy(base_case)]
+        payload["sensitivity_cases"][0]["source_proposal"] = "missing"
+        with self.assertRaisesRegex(ValueError, "unknown source proposal"):
+            calculate(payload)
+
+        payload = recurring_payload()
+        payload["sensitivity_cases"] = [copy.deepcopy(base_case)]
+        payload["sensitivity_cases"][0]["overrides"] = {
+            "assignments.missing.retention_rate_after_migration": scalar(0.82)
+        }
+        with self.assertRaisesRegex(ValueError, "unknown segment"):
+            calculate(payload)
+
+        for path in ("validation_stage", "assignments.small-teams.target_plan", "objective.metric"):
+            with self.subTest(path=path):
+                payload = recurring_payload()
+                payload["sensitivity_cases"] = [copy.deepcopy(base_case)]
+                payload["sensitivity_cases"][0]["overrides"] = {path: "changed"}
+                with self.assertRaisesRegex(ValueError, "unsupported sensitivity override path"):
+                    calculate(payload)
+
+    def test_revalidates_typed_overrides_and_share_constraints(self) -> None:
+        payload = recurring_payload()
+        payload["sensitivity_cases"] = [
+            {
+                "name": "untyped",
+                "source_proposal": "higher-flat-price",
+                "overrides": {
+                    "assignments.small-teams.retention_rate_after_migration": 0.82
+                },
+            }
+        ]
+        with self.assertRaisesRegex(ValueError, "must be an object"):
+            calculate(payload)
+
+        payload = recurring_payload()
+        payload["sensitivity_cases"] = [
+            {
+                "name": "too-many",
+                "source_proposal": "higher-flat-price",
+                "overrides": {
+                    "assignments.small-teams.manual_review_share": scalar(0.30)
+                },
+            }
+        ]
+        with self.assertRaisesRegex(ValueError, "migration and manual-review shares"):
+            calculate(payload)
+
+    def test_cases_recalculate_independently_and_report_changes(self) -> None:
+        payload = recurring_payload()
+        payload["sensitivity_cases"] = [
+            {
+                "name": "retention-downside",
+                "source_proposal": "higher-flat-price",
+                "overrides": {
+                    "assignments.small-teams.retention_rate_after_migration": scalar(
+                        0.82, "estimated"
+                    )
+                },
+            },
+            {
+                "name": "usage-upside",
+                "source_proposal": "higher-flat-price",
+                "overrides": {
+                    "assignments.small-teams.usage_multiplier": scalar(1.25, "estimated")
+                },
+            },
+        ]
+
+        result = calculate(payload)
+        source = result["proposals"][0]
+        downside, upside = result["sensitivity_cases"]
+
+        self.assertEqual(downside["source_proposal"], "higher-flat-price")
+        self.assertLess(downside["metrics"]["active_customers"], source["metrics"]["active_customers"])
+        self.assertEqual(upside["segments"][0]["retention_rate_after_migration"], Decimal("0.90"))
+        self.assertIn("active_customers", downside["deltas_from_source"])
+        self.assertIn(
+            "max_active_customer_loss_rate", downside["added_guardrail_violations"]
+        )
+        self.assertIn(
+            "guardrail_violated:max_active_customer_loss_rate",
+            downside["added_decision_reasons"],
+        )
+        self.assertIn("validation_required", downside["removed_decision_reasons"])
+
+
+class CliTests(unittest.TestCase):
+    def test_reads_valid_file_and_standard_input(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "pricing.json"
+            path.write_text(json.dumps(recurring_payload()), encoding="utf-8")
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                status = main([str(path)])
+        self.assertEqual(status, 0)
+        self.assertNotIn("\n ", stdout.getvalue())
+        self.assertEqual(json.loads(stdout.getvalue())["proposals"][0]["decision_status"], "pilot_first")
+
+        stdout = io.StringIO()
+        with patch("sys.stdin", io.StringIO(json.dumps(recurring_payload()))), redirect_stdout(stdout):
+            status = main(["-"])
+        self.assertEqual(status, 0)
+        self.assertEqual(json.loads(stdout.getvalue())["mode"], "recurring")
+
+    def test_file_json_and_validation_errors_return_two(self) -> None:
+        cases = [
+            (["/tmp/pricing-decision-file-that-does-not-exist.json"], None),
+            (["-"], "{"),
+            (["-"], json.dumps({"mode": "hybrid"})),
+        ]
+        for argv, stdin_value in cases:
+            with self.subTest(argv=argv, stdin_value=stdin_value):
+                stdout = io.StringIO()
+                stderr = io.StringIO()
+                context = (
+                    patch("sys.stdin", io.StringIO(stdin_value))
+                    if stdin_value is not None
+                    else patch("sys.stdin", io.StringIO(""))
+                )
+                with context, redirect_stdout(stdout), redirect_stderr(stderr):
+                    status = main(argv)
+                self.assertEqual(status, 2)
+                self.assertEqual(stdout.getvalue(), "")
+                self.assertTrue(stderr.getvalue().startswith("error: "))
         plan = usage_plan()
         plan["pricing"]["maximum_fee"] = money(None, "unknown")
         self.assertEqual(
