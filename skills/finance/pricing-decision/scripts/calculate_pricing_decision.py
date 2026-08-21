@@ -551,6 +551,7 @@ def _current_segment(
     return {
         "name": name,
         "current_plan": segment["current_plan"],
+        "current_customers": current_customers,
         "current_charge": current_charge,
         "retained_existing_customers": retained,
         "new_customers": new_customers,
@@ -789,12 +790,25 @@ def _proposal_segment(
         if isinstance(active, Decimal) and isinstance(proposal_usage, Decimal)
         else "indeterminate"
     )
+    price_change_amount: Decimal | str = (
+        effective_migrated_charge - current_charge
+        if isinstance(effective_migrated_charge, Decimal)
+        and isinstance(current_charge, Decimal)
+        else "indeterminate"
+    )
+    if not isinstance(price_change_amount, Decimal) or not isinstance(current_charge, Decimal):
+        price_change_rate: Decimal | str = "indeterminate"
+    elif current_charge == 0:
+        price_change_rate = "not_meaningful_zero_current_price"
+    else:
+        price_change_rate = price_change_amount / current_charge
     return {
         "name": name,
         "current_plan": segment["current_plan"],
         "target_plan": assignment["target_plan"],
         "migration_policy": assignment["migration_policy"],
         "retention_rate_after_migration": migration_retention,
+        "current_customers": current_customers,
         "migration_cohort": migration_cohort,
         "migrated_retained_customers": migrated_retained,
         "migration_losses": migration_losses,
@@ -804,6 +818,8 @@ def _proposal_segment(
         "current_charge": current_charge,
         "target_new_customer_charge": target_charge,
         "effective_migrated_charge": effective_migrated_charge,
+        "price_change_amount": price_change_amount,
+        "price_change_rate": price_change_rate,
         "proposal_usage_units_per_customer": proposal_usage,
         "proposal_variable_cost_per_customer": proposal_cost,
         "active_customers": active,
@@ -813,6 +829,91 @@ def _proposal_segment(
         "revenue": revenue,
         "contribution_profit": contribution,
         "total_usage_units": total_usage,
+    }
+
+
+PRICE_BAND_NAMES = (
+    "decrease",
+    "unchanged",
+    "0_to_10_percent",
+    "10_to_25_percent",
+    "25_to_50_percent",
+    "over_50_percent",
+)
+
+
+def _price_band(rate: Decimal) -> str:
+    if rate < 0:
+        return "decrease"
+    if rate == 0:
+        return "unchanged"
+    if rate <= Decimal("0.10"):
+        return "0_to_10_percent"
+    if rate <= Decimal("0.25"):
+        return "10_to_25_percent"
+    if rate <= Decimal("0.50"):
+        return "25_to_50_percent"
+    return "over_50_percent"
+
+
+def calculate_price_burden(segments: list[dict[str, object]]) -> dict[str, object]:
+    bands = {
+        name: {"customers": Decimal("0"), "share": "indeterminate"}
+        for name in PRICE_BAND_NAMES
+    }
+    weighted_rates: list[tuple[Decimal, Decimal]] = []
+    excluded_zero = Decimal("0")
+    indeterminate = Decimal("0")
+    total_migrated = Decimal("0")
+    for segment in segments:
+        customers = segment["migrated_retained_customers"]
+        if not isinstance(customers, Decimal):
+            continue
+        total_migrated += customers
+        rate = segment.get("price_change_rate")
+        if rate is None:
+            current_charge = segment.get("current_charge")
+            migrated_charge = segment.get("effective_migrated_charge")
+            if isinstance(current_charge, Decimal) and isinstance(migrated_charge, Decimal):
+                rate = (
+                    "not_meaningful_zero_current_price"
+                    if current_charge == 0
+                    else (migrated_charge - current_charge) / current_charge
+                )
+            else:
+                rate = "indeterminate"
+        if rate == "not_meaningful_zero_current_price":
+            excluded_zero += customers
+        elif isinstance(rate, Decimal):
+            bands[_price_band(rate)]["customers"] += customers
+            weighted_rates.append((rate, customers))
+        else:
+            indeterminate += customers
+
+    included = sum((weight for _, weight in weighted_rates), Decimal("0"))
+    if included == 0:
+        weighted_average: Decimal | str = "indeterminate"
+        weighted_median: Decimal | str = "indeterminate"
+    else:
+        weighted_average = sum((rate * weight for rate, weight in weighted_rates), Decimal("0")) / included
+        threshold = included / Decimal("2")
+        cumulative = Decimal("0")
+        weighted_median = weighted_rates[0][0]
+        for rate, weight in sorted(weighted_rates):
+            cumulative += weight
+            if cumulative >= threshold:
+                weighted_median = rate
+                break
+        for band in bands.values():
+            band["share"] = band["customers"] / included
+    return {
+        "weighted_average_increase_rate": weighted_average,
+        "weighted_median_increase_rate": weighted_median,
+        "included_customers": included,
+        "excluded_zero_current_price_customers": excluded_zero,
+        "indeterminate_customers": indeterminate,
+        "total_migrated_retained_customers": total_migrated,
+        "bands": bands,
     }
 
 
@@ -833,6 +934,144 @@ def _numeric_deltas(
         for field in fields
         if _is_numeric(proposal_metrics[field]) and _is_numeric(current_metrics[field])
     }
+
+
+def _objective_result(
+    data: dict[str, object],
+    proposal_metrics: dict[str, object],
+    current_metrics: dict[str, object],
+) -> dict[str, object]:
+    objective = data.get("objective")
+    if objective is None:
+        return {
+            "metric": None,
+            "current": "indeterminate",
+            "proposal": "indeterminate",
+            "delta": "objective_not_selected",
+        }
+    metric = objective["metric"]
+    current_value = current_metrics[metric]
+    proposal_value = proposal_metrics[metric]
+    delta: Decimal | str = (
+        proposal_value - current_value
+        if _is_numeric(proposal_value) and _is_numeric(current_value)
+        else "indeterminate"
+    )
+    return {
+        "metric": metric,
+        "current": current_value,
+        "proposal": proposal_value,
+        "delta": delta,
+    }
+
+
+def evaluate_guardrails(
+    data: dict[str, object],
+    proposal_result: dict[str, object],
+) -> tuple[dict[str, str], dict[str, dict[str, object]]]:
+    supplied = data.get("guardrails", {})
+    statuses: dict[str, str] = {}
+    details: dict[str, dict[str, object]] = {}
+    current_metrics = proposal_result["_current_metrics"]
+    proposal_metrics = proposal_result["metrics"]
+    burden = proposal_result["price_burden"]
+
+    current_active = current_metrics["active_customers"]
+    proposal_active = proposal_metrics["active_customers"]
+    if _is_numeric(current_active) and _is_numeric(proposal_active):
+        if current_active == 0:
+            active_loss_rate: Decimal | str = "not_meaningful_zero_current_customers"
+        else:
+            active_loss_rate = max(Decimal("0"), current_active - proposal_active) / current_active
+    else:
+        active_loss_rate = "indeterminate"
+    total_current = _metric_totals(proposal_result["segments"], "current_customers")
+    total_manual = _metric_totals(proposal_result["segments"], "manual_review_customers")
+    if isinstance(total_current, Decimal) and isinstance(total_manual, Decimal):
+        manual_share: Decimal | str = (
+            total_manual / total_current
+            if total_current != 0
+            else "not_meaningful_zero_current_customers"
+        )
+    else:
+        manual_share = "indeterminate"
+
+    actuals: dict[str, object] = {
+        "max_active_customer_loss_rate": active_loss_rate,
+        "min_contribution_margin": proposal_metrics["contribution_margin"],
+        "max_weighted_average_price_increase_rate": burden[
+            "weighted_average_increase_rate"
+        ],
+        "max_manual_review_share": manual_share,
+        "capacity_units_per_period": proposal_metrics["total_usage_units"],
+    }
+    for field, entry in supplied.items():
+        threshold = scalar_value(
+            entry,
+            f"guardrails.{field}",
+            rate=field != "capacity_units_per_period",
+        )
+        actual = actuals[field]
+        if field == "capacity_units_per_period":
+            capacity_status = proposal_metrics["capacity_status"]
+            status = (
+                "passed"
+                if capacity_status == "within_capacity"
+                else "violated"
+                if capacity_status == "beyond_capacity"
+                else "unassessed"
+            )
+        elif threshold is None or not isinstance(actual, Decimal):
+            status = "unassessed"
+        elif field == "min_contribution_margin":
+            status = "passed" if actual >= threshold else "violated"
+        else:
+            status = "passed" if actual <= threshold else "violated"
+        statuses[field] = status
+        details[field] = {"status": status, "actual": actual, "threshold": threshold}
+    return statuses, details
+
+
+def assign_decision_status(
+    data: dict[str, object],
+    proposal: dict[str, object],
+    result: dict[str, object],
+) -> tuple[str, list[str]]:
+    reasons: list[str] = []
+    objective = result["objective"]
+    if data.get("objective") is None:
+        reasons.append("objective_not_selected")
+    elif not isinstance(objective["delta"], Decimal):
+        reasons.append("objective_indeterminate")
+    if any(
+        path.endswith(
+            (
+                "retention_rate_after_migration",
+                "new_customer_multiplier",
+                "usage_multiplier",
+                "billable_amount_multiplier",
+                "variable_cost_multiplier",
+                "transition_discount_rate",
+            )
+        )
+        for path in result["missing_inputs"]
+    ):
+        reasons.append("critical_response_unknown")
+    for field, status in result["guardrails"].items():
+        if status == "unassessed":
+            reasons.append(f"guardrail_unassessed:{field}")
+    if reasons:
+        return "hold_for_evidence", reasons
+    if isinstance(objective["delta"], Decimal) and objective["delta"] <= 0:
+        reasons.append("objective_not_improved")
+    for field, status in result["guardrails"].items():
+        if status == "violated":
+            reasons.append(f"guardrail_violated:{field}")
+    if reasons:
+        return "reject_under_assumptions", reasons
+    if proposal["validation_stage"] == "validated":
+        return "candidate_for_rollout", []
+    return "pilot_first", ["validation_required"]
 
 
 def calculate_proposal(
@@ -908,7 +1147,7 @@ def calculate_proposal(
     missing, estimate_based = _input_quality(
         {"proposal": proposal, "segments": data["segments"]}
     )
-    return {
+    result = {
         "name": proposal["name"],
         "validation_stage": proposal["validation_stage"],
         "change_summary": proposal["change_summary"],
@@ -918,7 +1157,18 @@ def calculate_proposal(
         "metrics": metrics,
         "deltas": _numeric_deltas(metrics, current["metrics"]),
         "one_time_implementation_costs": one_time,
+        "price_burden": calculate_price_burden(segment_results),
+        "_current_metrics": current["metrics"],
     }
+    result["objective"] = _objective_result(data, metrics, current["metrics"])
+    statuses, details = evaluate_guardrails(data, result)
+    result["guardrails"] = statuses
+    result["guardrail_details"] = details
+    status, reasons = assign_decision_status(data, proposal, result)
+    result["decision_status"] = status
+    result["decision_reasons"] = reasons
+    del result["_current_metrics"]
+    return result
 
 
 def calculate(payload: dict[str, object]) -> dict[str, object]:

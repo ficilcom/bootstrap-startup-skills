@@ -13,7 +13,7 @@ from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
-from calculate_pricing_decision import calculate, calculate_charge, main
+from calculate_pricing_decision import calculate, calculate_charge, calculate_price_burden, main
 
 
 def money(
@@ -450,6 +450,134 @@ class ProposalEconomicsTests(unittest.TestCase):
         self.assertTrue(
             any(path.endswith("retention_rate_after_migration") for path in proposal["missing_inputs"])
         )
+
+
+class PriceBurdenTests(unittest.TestCase):
+    def test_calculates_weighted_existing_customer_burden(self) -> None:
+        burden = calculate(recurring_payload())["proposals"][0]["price_burden"]
+
+        self.assertEqual(burden["weighted_average_increase_rate"], Decimal("0.125"))
+        self.assertEqual(burden["weighted_median_increase_rate"], Decimal("0.125"))
+        self.assertEqual(burden["bands"]["10_to_25_percent"]["customers"], 72)
+
+    def test_assigns_all_price_change_bands(self) -> None:
+        segments = [
+            {
+                "name": name,
+                "current_charge": Decimal("100"),
+                "effective_migrated_charge": Decimal(str(target)),
+                "migrated_retained_customers": Decimal("1"),
+            }
+            for name, target in (
+                ("decrease", 90),
+                ("same", 100),
+                ("small", 105),
+                ("medium", 120),
+                ("large", 140),
+                ("very-large", 160),
+            )
+        ]
+
+        burden = calculate_price_burden(segments)
+
+        self.assertEqual(burden["bands"]["decrease"]["customers"], 1)
+        self.assertEqual(burden["bands"]["unchanged"]["customers"], 1)
+        self.assertEqual(burden["bands"]["0_to_10_percent"]["customers"], 1)
+        self.assertEqual(burden["bands"]["10_to_25_percent"]["customers"], 1)
+        self.assertEqual(burden["bands"]["25_to_50_percent"]["customers"], 1)
+        self.assertEqual(burden["bands"]["over_50_percent"]["customers"], 1)
+
+    def test_zero_current_price_is_excluded_from_percentage_burden(self) -> None:
+        payload = recurring_payload()
+        payload["plans"][0]["pricing"]["flat_fee"] = money(0)
+
+        proposal = calculate(payload)["proposals"][0]
+        segment = proposal["segments"][0]
+
+        self.assertEqual(segment["price_change_amount"], 22_500)
+        self.assertEqual(segment["price_change_rate"], "not_meaningful_zero_current_price")
+        self.assertEqual(proposal["price_burden"]["excluded_zero_current_price_customers"], 72)
+        self.assertEqual(proposal["price_burden"]["weighted_average_increase_rate"], "indeterminate")
+
+
+class DecisionTests(unittest.TestCase):
+    def test_hypothesis_with_improving_objective_requires_pilot(self) -> None:
+        result = calculate(recurring_payload())["proposals"][0]
+
+        self.assertEqual(result["objective"]["delta"], 93_000)
+        self.assertEqual(result["decision_status"], "pilot_first")
+        self.assertIn("validation_required", result["decision_reasons"])
+
+    def test_validated_proposal_with_passing_guardrails_is_candidate(self) -> None:
+        payload = recurring_payload()
+        payload["proposals"][0]["validation_stage"] = "validated"
+
+        result = calculate(payload)["proposals"][0]
+
+        self.assertEqual(result["decision_status"], "candidate_for_rollout")
+        self.assertEqual(set(result["guardrails"].values()), {"passed"})
+
+    def test_each_financial_guardrail_can_reject_an_improving_proposal(self) -> None:
+        cases = {
+            "max_weighted_average_price_increase_rate": scalar(0.10),
+            "min_contribution_margin": scalar(0.80),
+            "max_active_customer_loss_rate": scalar(0.02),
+            "max_manual_review_share": scalar(0.05),
+            "capacity_units_per_period": scalar(800),
+        }
+        for field, threshold in cases.items():
+            with self.subTest(field=field):
+                payload = recurring_payload()
+                payload["guardrails"][field] = threshold
+
+                result = calculate(payload)["proposals"][0]
+
+                self.assertEqual(result["guardrails"][field], "violated")
+                self.assertEqual(result["decision_status"], "reject_under_assumptions")
+                self.assertIn(f"guardrail_violated:{field}", result["decision_reasons"])
+
+    def test_nonimproving_objective_is_rejected(self) -> None:
+        payload = recurring_payload()
+        payload["objective"] = {"metric": "active_customers"}
+
+        result = calculate(payload)["proposals"][0]
+
+        self.assertEqual(result["objective"]["delta"], -3)
+        self.assertEqual(result["decision_status"], "reject_under_assumptions")
+        self.assertIn("objective_not_improved", result["decision_reasons"])
+
+    def test_missing_objective_or_critical_response_holds_for_evidence(self) -> None:
+        payload = recurring_payload()
+        del payload["objective"]
+        result = calculate(payload)["proposals"][0]
+        self.assertEqual(result["decision_status"], "hold_for_evidence")
+        self.assertIn("objective_not_selected", result["decision_reasons"])
+
+        payload = recurring_payload()
+        payload["proposals"][0]["assignments"][0]["retention_rate_after_migration"] = scalar(
+            None, "unknown"
+        )
+        result = calculate(payload)["proposals"][0]
+        self.assertEqual(result["decision_status"], "hold_for_evidence")
+        self.assertIn("critical_response_unknown", result["decision_reasons"])
+
+    def test_unknown_supplied_guardrail_is_unassessed(self) -> None:
+        payload = recurring_payload()
+        payload["guardrails"]["max_active_customer_loss_rate"] = scalar(None, "unknown")
+
+        result = calculate(payload)["proposals"][0]
+
+        self.assertEqual(result["guardrails"]["max_active_customer_loss_rate"], "unassessed")
+        self.assertEqual(result["decision_status"], "hold_for_evidence")
+
+    def test_omitted_guardrails_do_not_create_universal_thresholds(self) -> None:
+        payload = recurring_payload()
+        payload["guardrails"] = {}
+
+        result = calculate(payload)["proposals"][0]
+
+        self.assertEqual(result["guardrails"], {})
+        self.assertEqual(result["decision_status"], "pilot_first")
         plan = usage_plan()
         plan["pricing"]["maximum_fee"] = money(None, "unknown")
         self.assertEqual(
