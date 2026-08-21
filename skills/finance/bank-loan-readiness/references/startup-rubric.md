@@ -4,13 +4,15 @@ Use this rubric only with `mode: "startup"`. For every criterion, produce a JSON
 
 Distinguish documents or independently verifiable records (`confirmed`) from the applicant's direct statements (`reported`), reasoned conclusions (`inferred`), and missing information (`unknown`). Do not promote an assumption to a fact.
 
+If the required evidence is unavailable, set `evidence: "unknown"`; the scorer awards that criterion zero regardless of the placeholder rating. Describe the missing information and a follow-up question, not an adverse business fact. Apply a low-rating anchor only to a confirmed or reported weakness, not to silence, unavailable records, or an unverified assumption.
+
 ## `business_plan` — weight 25
 
 **Inspect:** the customer problem; offering; defined target market; customer-acquisition path; supplier, delivery, staffing, or other operating assumptions; and sales logic that can be externally supported (for example, market evidence, quotations, signed demand, or comparable operating data).
 
 | Rating | Observable anchor |
 | --- | --- |
-| 0 | No coherent business concept or no usable explanation of customers, offering, and revenue generation. |
+| 0 | Confirmed or reported facts show no coherent business concept or no usable explanation of customers, offering, and revenue generation. |
 | 1 | A concept and broad audience are stated, but problem, market, acquisition, operating assumptions, and sales estimates are largely unsupported or conflict. |
 | 3 | The customer problem, offering, target, acquisition path, and key operating assumptions are specific; sales logic is plausible and partly supported, with material assumptions identified. |
 | 5 | A coherent, internally consistent plan links a validated customer problem to a differentiated offering, defined market, repeatable acquisition path, feasible operating model, and well-supported sales logic. |
@@ -21,7 +23,7 @@ Distinguish documents or independently verifiable records (`confirmed`) from the
 
 | Rating | Observable anchor |
 | --- | --- |
-| 0 | Requested amount, use of funds, and total project cost cannot be determined. |
+| 0 | Confirmed or reported facts show that the requested amount, use of funds, and total project cost are absent or fundamentally incoherent. |
 | 1 | Uses are broad estimates, funding sources do not reconcile, or owner funding and its provenance are unclear. |
 | 3 | Startup and working-capital needs are itemized with some quotes or calculations; sources reconcile to uses; owner funding is explained; borrowing dependence is plausible but has notable assumptions. |
 | 5 | A complete, well-supported sources-and-uses schedule reconciles exactly, substantiates material costs, documents owner-funding provenance, and shows borrowing sized appropriately for a credible launch and cash buffer. |
@@ -34,7 +36,7 @@ Do not apply a universal minimum owner-funding ratio. Owner funding is one facto
 
 | Rating | Observable anchor |
 | --- | --- |
-| 0 | No monthly cash-flow view or no basis for sales, costs, and debt repayment. |
+| 0 | Confirmed or reported cash-flow assumptions show no viable basis for sales, costs, and debt repayment. |
 | 1 | A repayment claim depends on unexplained sales, omits material costs, taxes, living costs, or debt payments, or has no downside case. |
 | 3 | A monthly forecast explains sales, costs, expenses, taxes, relevant living costs, existing and requested payments; residual cash is positive in the base case, while downside resilience needs work or support. |
 | 5 | A reconciled monthly cash-flow model uses supported assumptions, includes all material obligations and taxes, retains a credible buffer after requested payments, and remains workable under a clearly tested downside case. |
@@ -45,7 +47,7 @@ Do not apply a universal minimum owner-funding ratio. Owner funding is one facto
 
 | Rating | Observable anchor |
 | --- | --- |
-| 0 | Capability, role ownership, and required qualifications are absent or incompatible with the proposed operation. |
+| 0 | Confirmed or reported facts show that capability, role ownership, or required qualifications are absent or incompatible with the proposed operation. |
 | 1 | The founder has limited relevant experience and material execution gaps without a workable mitigation plan. |
 | 3 | Relevant experience or transferable management capability is demonstrated; required qualifications and material gaps are identified, with plausible mitigation and some execution evidence. |
 | 5 | Strong directly relevant industry and management track record, required licenses, and meaningful execution evidence are complemented by a credible team and specific mitigation for residual gaps. |
@@ -57,7 +59,7 @@ Do not apply a universal minimum owner-funding ratio. Owner funding is one facto
 | Rating | Observable anchor |
 | --- | --- |
 | 0 | Confirmed unlawful operation, serious current delinquency, or material false declaration is present. |
-| 1 | Material compliance status, permits, tax or insurance position, or voluntarily disclosed repayment history is unresolved, adverse, or inconsistent. |
+| 1 | A confirmed or reported material compliance issue, permit gap, tax or insurance concern, or voluntarily disclosed repayment matter remains unresolved or inconsistent. |
 | 3 | Required permits and relevant tax, insurance, and disclosed repayment matters are addressed; minor gaps or documentation follow-up remains. |
 | 5 | Current, consistent records support required permits, tax and social-insurance compliance, and disclosed repayment history, with no material contradiction. |
 
@@ -69,11 +71,11 @@ Do not request credit files or sensitive personal information beyond what the ap
 
 | Rating | Observable anchor |
 | --- | --- |
-| 0 | Essential documents are unavailable and material assumptions cannot be explained. |
-| 1 | Documents are sparse, stale, contradictory, or not understandable to the applicant. |
+| 0 | Confirmed or reported facts show that essential records do not exist or are materially unusable, and material assumptions cannot be explained. |
+| 1 | Available documents are materially incomplete, stale, contradictory, or not understandable to the applicant. |
 | 3 | Core documents are available and reasonably current; most figures reconcile and material assumptions can be explained, with targeted follow-up needed. |
 | 5 | Current, complete, internally consistent records substantiate the application, and the applicant can clearly explain all material assumptions and variances. |
 
 ## Assessment output discipline
 
-Keep evidence short and traceable, such as “two signed supplier quotations dated May 2026” rather than a conclusion alone. List unknowns separately so they do not masquerade as low ratings with known evidence. Route confirmed or reported serious concerns through [red-flags.md](red-flags.md); do not submit `unknown` or `inferred` concerns as red flags.
+Keep evidence short and traceable, such as “two signed supplier quotations dated May 2026” rather than a conclusion alone. List unknowns separately so they do not masquerade as low ratings or adverse facts. Route confirmed or reported serious concerns through [red-flags.md](red-flags.md); do not submit `unknown` or `inferred` concerns as red flags.
