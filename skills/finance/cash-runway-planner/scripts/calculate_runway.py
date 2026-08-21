@@ -147,15 +147,32 @@ def _validate_periods(
             raise ValueError(f"scenario {scenario_name} first 13 periods must be weekly")
         if any(item[2] != "month" for item in parsed_periods[13:]):
             raise ValueError(f"scenario {scenario_name} periods after week 13 must be monthly")
-        for start, end, _ in parsed_periods[:13]:
-            if (end - start).days != 6:
-                raise ValueError(f"scenario {scenario_name} weekly periods must contain seven days")
+        first_start, first_end, _ = parsed_periods[0]
+        if first_end.weekday() != 6 or not 0 <= (first_end - first_start).days <= 6:
+            raise ValueError(
+                f"scenario {scenario_name} first weekly period must end on Sunday within seven days"
+            )
+        for start, end, _ in parsed_periods[1:13]:
+            if start.weekday() != 0 or end.weekday() != 6 or (end - start).days != 6:
+                raise ValueError(
+                    f"scenario {scenario_name} later weekly periods must run Monday through Sunday"
+                )
+        monthly_periods = parsed_periods[13:]
     elif any(item[2] != "month" for item in parsed_periods):
         raise ValueError(f"scenario {scenario_name} quick-mode periods must be monthly")
+    else:
+        monthly_periods = parsed_periods
+
+    for start, end, _ in monthly_periods:
+        calendar_end = date(start.year, start.month, calendar.monthrange(start.year, start.month)[1])
+        if end != min(calendar_end, horizon_end):
+            raise ValueError(
+                f"scenario {scenario_name} monthly periods must end at calendar month-end or horizon"
+            )
     return period_id_order
 
 
-def _validate_warning_policy(value: object) -> None:
+def _validate_warning_policy(value: object, as_of: date) -> None:
     if value is None:
         return
     policy = _require_object(value, "warning_policy")
@@ -170,6 +187,9 @@ def _validate_warning_policy(value: object) -> None:
         numbers.append(raw)
     if numbers != sorted(numbers) or len(set(numbers)) != 3:
         raise ValueError("warning_policy day thresholds must be strictly ascending")
+    horizon_days = (add_months(as_of, 12) - as_of).days
+    if policy["watch_days"] < horizon_days:
+        raise ValueError("warning_policy.watch_days must cover the 12-month horizon")
 
 
 def _validate_actions(
@@ -279,7 +299,7 @@ def validate(payload: object) -> dict[str, Any]:
     if "base" not in scenario_names:
         raise ValueError("scenarios must include a base scenario")
 
-    _validate_warning_policy(data.get("warning_policy"))
+    _validate_warning_policy(data.get("warning_policy"), as_of)
     _validate_actions(
         data.get("modeled_actions", []),
         scenario_period_ids=scenario_period_ids,

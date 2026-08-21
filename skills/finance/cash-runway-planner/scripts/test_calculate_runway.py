@@ -32,7 +32,11 @@ def forecast_periods(as_of: date = date(2026, 1, 5)) -> list[dict[str, object]]:
     periods: list[dict[str, object]] = []
     start = as_of
     for index in range(13):
-        end = start + timedelta(days=6)
+        end = (
+            start + timedelta(days=(6 - start.weekday()))
+            if index == 0
+            else start + timedelta(days=6)
+        )
         periods.append(
             {
                 "id": f"w{index + 1:02d}",
@@ -175,6 +179,35 @@ class ValidationTests(unittest.TestCase):
         payload = detailed_payload()
         payload["currency"] = "yen"
         with self.assertRaisesRegex(ValueError, "currency must be a three-letter code"):
+            calculate(payload)
+
+    def test_accepts_partial_first_week_ending_on_sunday(self) -> None:
+        payload = detailed_payload()
+        payload["as_of_date"] = "2026-01-08"
+        payload["scenarios"][0]["periods"] = forecast_periods(date(2026, 1, 8))
+
+        result = calculate(payload)
+
+        self.assertEqual(result["scenarios"][0]["periods"][0]["end_date"], "2026-01-11")
+
+    def test_rejects_monthly_period_not_ending_at_month_end(self) -> None:
+        payload = detailed_payload()
+        periods = payload["scenarios"][0]["periods"]
+        periods[13]["end_date"] = "2026-04-29"
+        periods[14]["start_date"] = "2026-04-30"
+
+        with self.assertRaisesRegex(ValueError, "monthly periods must end"):
+            calculate(payload)
+
+    def test_rejects_warning_policy_shorter_than_horizon(self) -> None:
+        payload = detailed_payload()
+        payload["warning_policy"] = {
+            "critical_days": 60,
+            "warning_days": 120,
+            "watch_days": 300,
+        }
+
+        with self.assertRaisesRegex(ValueError, "watch_days must cover"):
             calculate(payload)
 
 
