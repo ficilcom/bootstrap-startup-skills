@@ -42,7 +42,7 @@ Permitted severities are `major` and `critical`; permitted red-flag evidence val
 
 ### `missing_required_license` — critical when operation is unlawful; otherwise major
 
-**Use when:** a required license or permit is missing, expired, suspended, or cannot be substantiated. Set `critical` only when the missing authorization makes the present or proposed operation unlawful; otherwise set `major`.
+**Use when:** a required license or permit is confirmed or reported as missing, expired, or suspended. Set `critical` only when the missing authorization makes the present or proposed operation unlawful; otherwise set `major`. A lack of documentary proof alone is `unknown`, not a red flag; ask for the authorization or an authoritative requirement check.
 
 **Why it matters:** missing authority can interrupt operations, revenue, insurance, and enforceability.
 
