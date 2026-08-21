@@ -284,5 +284,166 @@ class UnitProfitTests(unittest.TestCase):
         self.assertEqual(result["breakpoints"]["maximum_variable_cost_for_positive_contribution"], 9_500)
 
 
+class CustomerEconomicsTests(unittest.TestCase):
+    def test_calculates_each_cac_basis_payback_and_constant_retention_ltv(self) -> None:
+        result = calculate(recurring_payload())["scenarios"][0]
+
+        self.assertEqual(result["cac"]["by_basis"]["paid"], 8_000)
+        self.assertEqual(result["cac"]["by_basis"]["blended"], 14_000)
+        self.assertEqual(result["cac"]["by_basis"]["fully_loaded"], 20_000)
+        self.assertEqual(result["cac"]["by_basis"]["marginal"], 18_000)
+        self.assertEqual(result["cac"]["selected_basis"], "fully_loaded")
+        self.assertEqual(result["cac"]["selected_cac"], 20_000)
+        self.assertEqual(result["customer_economics"]["contribution_per_period"], 8_500)
+        self.assertEqual(
+            result["customer_economics"]["payback_periods"],
+            Decimal("2.352941176470588235294117647"),
+        )
+        self.assertEqual(result["customer_economics"]["ltv"], 212_500)
+        self.assertEqual(result["customer_economics"]["expected_lifetime_periods"], 25)
+        self.assertEqual(result["customer_economics"]["ltv_to_cac"], Decimal("10.625"))
+
+    def test_zero_churn_does_not_return_infinite_ltv(self) -> None:
+        payload = recurring_payload()
+        payload["scenarios"][0]["ltv_model"]["churn_rate_per_period"] = scalar(0)
+
+        result = calculate(payload)["scenarios"][0]["customer_economics"]
+
+        self.assertEqual(result["ltv"], "zero_churn_requires_fixed_horizon_or_cohort")
+        self.assertEqual(
+            result["expected_lifetime_periods"],
+            "zero_churn_requires_fixed_horizon_or_cohort",
+        )
+        self.assertEqual(result["ltv_to_cac"], "indeterminate")
+
+    def test_fixed_horizon_transactional_ltv(self) -> None:
+        payload = recurring_payload()
+        payload["mode"] = "transactional"
+        use_fixed_horizon(payload, expected_units=5, horizon=12)
+
+        result = calculate(payload)["scenarios"][0]["customer_economics"]
+
+        self.assertEqual(result["ltv_method"], "fixed_horizon")
+        self.assertEqual(result["ltv"], 42_500)
+        self.assertEqual(result["ltv_horizon_periods"], 12)
+        self.assertEqual(result["ltv_to_cac"], Decimal("2.125"))
+
+    def test_observed_cohort_uses_cumulative_payback_without_extrapolation(self) -> None:
+        payload = recurring_payload()
+        payload["scenarios"][0]["ltv_model"] = {
+            "method": "observed_cohort",
+            "cohort_customers": scalar(40),
+            "contribution_totals_by_period": [money(320_000), money(480_000), money(240_000)],
+            "period_unit": "month",
+        }
+
+        result = calculate(payload)["scenarios"][0]["customer_economics"]
+
+        self.assertEqual(result["payback_periods"], 2)
+        self.assertEqual(result["ltv"], 26_000)
+        self.assertEqual(result["ltv_horizon_periods"], 3)
+
+        payload["scenarios"][0]["ltv_model"]["contribution_totals_by_period"] = [money(100_000)]
+        result = calculate(payload)["scenarios"][0]["customer_economics"]
+        self.assertEqual(result["payback_periods"], "not_observed_within_horizon")
+
+    def test_zero_customer_denominators_return_typed_states(self) -> None:
+        payload = recurring_payload()
+        payload["scenarios"][0]["drivers"]["new_customers"] = scalar(0)
+        payload["scenarios"][0]["acquisition"]["marginal_new_customers"] = scalar(0)
+
+        result = calculate(payload)["scenarios"][0]
+
+        self.assertEqual(result["cac"]["by_basis"]["paid"], "indeterminate_zero_new_customers")
+        self.assertEqual(
+            result["cac"]["by_basis"]["marginal"],
+            "indeterminate_zero_marginal_new_customers",
+        )
+        self.assertEqual(result["customer_economics"]["payback_periods"], "indeterminate")
+
+    def test_zero_selected_cac_has_typed_ratio(self) -> None:
+        payload = recurring_payload()
+        payload["scenarios"][0]["acquisition"]["costs"]["fully_loaded"] = money(0)
+
+        result = calculate(payload)["scenarios"][0]["customer_economics"]
+
+        self.assertEqual(result["payback_periods"], 0)
+        self.assertEqual(result["ltv_to_cac"], "not_meaningful_zero_cac")
+
+    def test_nonpositive_customer_contribution_is_not_recoverable(self) -> None:
+        payload = recurring_payload()
+        payload["mode"] = "transactional"
+        use_fixed_horizon(payload)
+        drivers = payload["scenarios"][0]["drivers"]
+        drivers["price_per_unit"] = money(1_000)
+        drivers["cogs_per_unit"] = money(700)
+        drivers["other_variable_cost_per_unit"] = money(400)
+
+        result = calculate(payload)["scenarios"][0]
+
+        self.assertEqual(result["customer_economics"]["payback_periods"], "not_recoverable")
+        self.assertIn("negative_unit_economics", result["diagnostic_flags"])
+        self.assertIn("acquisition_not_recovered", result["diagnostic_flags"])
+
+
+class DiagnosticTests(unittest.TestCase):
+    def test_complete_base_case_supports_profitable_to_scale(self) -> None:
+        flags = calculate(recurring_payload())["scenarios"][0]["diagnostic_flags"]
+
+        self.assertIn("profitable_to_scale", flags)
+        self.assertNotIn("positive_unit_economics_unassessed_acquisition", flags)
+
+    def test_incomplete_or_misaligned_cac_scope_prevents_scale_claim(self) -> None:
+        for field in ("decision_cac_scope_complete", "selected_pool_matches_customer_cohort"):
+            with self.subTest(field=field):
+                payload = recurring_payload()
+                payload["scenarios"][0]["acquisition"][field] = False
+
+                flags = calculate(payload)["scenarios"][0]["diagnostic_flags"]
+
+                self.assertNotIn("profitable_to_scale", flags)
+                self.assertIn("positive_unit_economics_unassessed_acquisition", flags)
+
+    def test_target_exceeded_but_ltv_recovers_cac_is_cash_hungry(self) -> None:
+        payload = recurring_payload()
+        payload["scenarios"][0]["targets"]["max_payback_periods"] = scalar(1)
+
+        flags = calculate(payload)["scenarios"][0]["diagnostic_flags"]
+
+        self.assertIn("unit_positive_but_cash_hungry", flags)
+        self.assertNotIn("acquisition_not_recovered", flags)
+        self.assertNotIn("profitable_to_scale", flags)
+
+    def test_break_even_beyond_capacity_is_flagged(self) -> None:
+        payload = recurring_payload()
+        payload["scenarios"][0]["drivers"]["capacity_units"] = scalar(100)
+
+        flags = calculate(payload)["scenarios"][0]["diagnostic_flags"]
+
+        self.assertIn("break_even_beyond_capacity", flags)
+        self.assertNotIn("profitable_to_scale", flags)
+
+    def test_unknown_unit_input_is_indeterminate(self) -> None:
+        payload = recurring_payload()
+        payload["scenarios"][0]["drivers"]["cogs_per_unit"] = money(None, "unknown")
+
+        flags = calculate(payload)["scenarios"][0]["diagnostic_flags"]
+
+        self.assertIn("indeterminate", flags)
+
+    def test_returns_acquisition_breakpoints_and_clamps_churn(self) -> None:
+        result = calculate(recurring_payload())["scenarios"][0]["breakpoints"]
+
+        self.assertEqual(result["maximum_cac_for_payback_target"], 68_000)
+        self.assertEqual(result["maximum_constant_churn_for_ltv_equal_cac"], Decimal("0.425"))
+        self.assertEqual(result["maximum_constant_churn_constraint"], "within_probability_range")
+
+        payload = recurring_payload()
+        payload["scenarios"][0]["acquisition"]["costs"]["fully_loaded"] = money(5_000)
+        result = calculate(payload)["scenarios"][0]["breakpoints"]
+        self.assertEqual(result["maximum_constant_churn_for_ltv_equal_cac"], 1)
+        self.assertEqual(result["maximum_constant_churn_constraint"], "clamped_to_one")
+
+
 if __name__ == "__main__":
     unittest.main()

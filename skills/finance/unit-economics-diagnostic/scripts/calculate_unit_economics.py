@@ -321,6 +321,249 @@ def _known(*values: Decimal | None) -> bool:
     return all(value is not None for value in values)
 
 
+def _calculate_cac(
+    scenario: dict[str, object],
+    *,
+    currency: str,
+) -> tuple[dict[str, object], Decimal | str]:
+    drivers = scenario["drivers"]
+    acquisition = scenario["acquisition"]
+    new_customers = scalar_value(drivers["new_customers"], "drivers.new_customers")
+    marginal_customers = (
+        scalar_value(
+            acquisition["marginal_new_customers"],
+            "acquisition.marginal_new_customers",
+        )
+        if "marginal_new_customers" in acquisition
+        else None
+    )
+    by_basis: dict[str, Decimal | str] = {}
+    for basis, entry in acquisition["costs"].items():
+        pool = money_value(entry, f"acquisition.costs.{basis}", currency)
+        denominator = marginal_customers if basis == "marginal" else new_customers
+        if pool is None or denominator is None:
+            value: Decimal | str = "indeterminate"
+        elif denominator == 0:
+            value = (
+                "indeterminate_zero_marginal_new_customers"
+                if basis == "marginal"
+                else "indeterminate_zero_new_customers"
+            )
+        else:
+            value = pool / denominator
+        by_basis[basis] = value
+
+    selected_basis = acquisition["decision_cac_basis"]
+    selected_cac = by_basis[selected_basis]
+    return (
+        {
+            "by_basis": by_basis,
+            "selected_basis": selected_basis,
+            "selected_cac": selected_cac,
+            "scope_complete": acquisition["decision_cac_scope_complete"],
+            "customer_cohort_aligned": acquisition["selected_pool_matches_customer_cohort"],
+            "selected_pool_included_in_fixed_costs": acquisition[
+                "selected_pool_included_in_fixed_costs"
+            ],
+        },
+        selected_cac,
+    )
+
+
+def _calculate_customer_economics(
+    scenario: dict[str, object],
+    *,
+    contribution: Decimal | str,
+    selected_cac: Decimal | str,
+    currency: str,
+) -> dict[str, object]:
+    drivers = scenario["drivers"]
+    units_per_customer = (
+        scalar_value(
+            drivers["units_per_customer_per_period"],
+            "drivers.units_per_customer_per_period",
+        )
+        if "units_per_customer_per_period" in drivers
+        else None
+    )
+    customer_contribution: Decimal | str = (
+        contribution * units_per_customer
+        if isinstance(contribution, Decimal) and units_per_customer is not None
+        else "indeterminate"
+    )
+
+    model = scenario["ltv_model"]
+    method = model["method"]
+    horizon: int | str | None = None
+    expected_lifetime: Decimal | str | None = None
+
+    if method == "observed_cohort":
+        cohort_customers = scalar_value(model["cohort_customers"], "ltv_model.cohort_customers")
+        totals = [
+            money_value(entry, f"ltv_model.contribution_totals_by_period[{index}]", currency)
+            for index, entry in enumerate(model["contribution_totals_by_period"])
+        ]
+        horizon = len(totals)
+        if cohort_customers is None or any(total is None for total in totals):
+            ltv: Decimal | str = "indeterminate"
+            payback: Decimal | int | str = "indeterminate"
+        elif cohort_customers == 0:
+            ltv = "indeterminate_zero_cohort_customers"
+            payback = "indeterminate_zero_cohort_customers"
+        else:
+            known_totals = [total for total in totals if isinstance(total, Decimal)]
+            ltv = sum(known_totals, Decimal("0")) / cohort_customers
+            if not isinstance(selected_cac, Decimal):
+                payback = "indeterminate"
+            elif selected_cac == 0:
+                payback = 0
+            else:
+                cumulative = Decimal("0")
+                payback = "not_observed_within_horizon"
+                for period, total in enumerate(known_totals, start=1):
+                    cumulative += total / cohort_customers
+                    if cumulative >= selected_cac:
+                        payback = period
+                        break
+    else:
+        if not isinstance(contribution, Decimal) or not isinstance(customer_contribution, Decimal):
+            payback = "indeterminate"
+        elif contribution <= 0 or customer_contribution <= 0:
+            payback = "not_recoverable"
+        elif not isinstance(selected_cac, Decimal):
+            payback = "indeterminate"
+        else:
+            payback = selected_cac / customer_contribution
+
+        if method == "fixed_horizon":
+            expected_units = scalar_value(
+                model["expected_units_per_customer_within_horizon"],
+                "ltv_model.expected_units_per_customer_within_horizon",
+            )
+            horizon_value = scalar_value(model["horizon_periods"], "ltv_model.horizon_periods")
+            horizon = int(horizon_value) if horizon_value is not None else "indeterminate"
+            ltv = (
+                contribution * expected_units
+                if isinstance(contribution, Decimal) and expected_units is not None
+                else "indeterminate"
+            )
+        else:
+            churn = scalar_value(
+                model["churn_rate_per_period"],
+                "ltv_model.churn_rate_per_period",
+                rate=True,
+            )
+            if churn is None or not isinstance(customer_contribution, Decimal):
+                ltv = "indeterminate"
+                expected_lifetime = "indeterminate"
+            elif churn == 0:
+                ltv = "zero_churn_requires_fixed_horizon_or_cohort"
+                expected_lifetime = "zero_churn_requires_fixed_horizon_or_cohort"
+            else:
+                expected_lifetime = Decimal("1") / churn
+                ltv = customer_contribution / churn
+
+    if not isinstance(ltv, Decimal) or not isinstance(selected_cac, Decimal):
+        ltv_to_cac: Decimal | str = "indeterminate"
+    elif selected_cac == 0:
+        ltv_to_cac = "not_meaningful_zero_cac"
+    else:
+        ltv_to_cac = ltv / selected_cac
+
+    return {
+        "contribution_per_period": customer_contribution,
+        "payback_periods": payback,
+        "ltv_method": method,
+        "ltv": ltv,
+        "ltv_horizon_periods": horizon,
+        "expected_lifetime_periods": expected_lifetime,
+        "ltv_to_cac": ltv_to_cac,
+    }
+
+
+def _acquisition_recovery_state(
+    customer_economics: dict[str, object],
+    selected_cac: Decimal | str,
+    contribution: Decimal | str,
+) -> bool | None:
+    if not isinstance(contribution, Decimal):
+        return None
+    if contribution <= 0:
+        return False
+    if not isinstance(selected_cac, Decimal):
+        return None
+    payback = customer_economics["payback_periods"]
+    if customer_economics["ltv_method"] == "observed_cohort":
+        if isinstance(payback, (int, Decimal)):
+            return True
+        if payback == "not_observed_within_horizon":
+            return False
+        return None
+    ltv = customer_economics["ltv"]
+    return ltv >= selected_cac if isinstance(ltv, Decimal) else None
+
+
+def _diagnose(
+    scenario: dict[str, object],
+    *,
+    contribution: Decimal | str,
+    capacity_status: str,
+    selected_cac: Decimal | str,
+    customer_economics: dict[str, object],
+) -> list[str]:
+    flags: list[str] = []
+    if not isinstance(contribution, Decimal):
+        return ["indeterminate"]
+    if contribution <= 0:
+        flags.append("negative_unit_economics")
+    if capacity_status == "beyond_capacity":
+        flags.append("break_even_beyond_capacity")
+
+    recovered = _acquisition_recovery_state(customer_economics, selected_cac, contribution)
+    if recovered is False:
+        flags.append("acquisition_not_recovered")
+
+    targets = scenario.get("targets", {})
+    max_payback = (
+        scalar_value(targets["max_payback_periods"], "targets.max_payback_periods")
+        if "max_payback_periods" in targets
+        else None
+    )
+    payback = customer_economics["payback_periods"]
+    target_met: bool | None = None
+    if max_payback is not None and isinstance(payback, (int, Decimal)):
+        target_met = Decimal(payback) <= max_payback
+        if recovered is True and not target_met:
+            flags.append("unit_positive_but_cash_hungry")
+    elif "max_payback_periods" not in targets:
+        target_met = True
+
+    acquisition = scenario["acquisition"]
+    scope_ready = (
+        acquisition["decision_cac_scope_complete"]
+        and acquisition["selected_pool_matches_customer_cohort"]
+    )
+    scale_ready = (
+        contribution > 0
+        and capacity_status == "within_capacity"
+        and scope_ready
+        and recovered is True
+        and target_met is True
+    )
+    if scale_ready:
+        flags.append("profitable_to_scale")
+    elif contribution > 0 and not any(
+        flag in flags
+        for flag in (
+            "acquisition_not_recovered",
+            "unit_positive_but_cash_hungry",
+            "break_even_beyond_capacity",
+        )
+    ):
+        flags.append("positive_unit_economics_unassessed_acquisition")
+    return flags
+
+
 def calculate_scenario(
     scenario: dict[str, object],
     *,
@@ -416,6 +659,60 @@ def calculate_scenario(
     else:
         minimum_break_even_price = cogs + variable + fixed / volume
 
+    cac, selected_cac = _calculate_cac(scenario, currency=currency)
+    customer_economics = _calculate_customer_economics(
+        scenario,
+        contribution=contribution,
+        selected_cac=selected_cac,
+        currency=currency,
+    )
+    targets = scenario.get("targets", {})
+    if "max_payback_periods" not in targets:
+        maximum_cac: Decimal | str = "not_supplied"
+    else:
+        payback_target = scalar_value(
+            targets["max_payback_periods"],
+            "targets.max_payback_periods",
+        )
+        customer_contribution = customer_economics["contribution_per_period"]
+        if not isinstance(customer_contribution, Decimal) or payback_target is None:
+            maximum_cac = "indeterminate"
+        elif customer_contribution <= 0:
+            maximum_cac = "not_recoverable"
+        else:
+            maximum_cac = customer_contribution * payback_target
+
+    if scenario["ltv_model"]["method"] != "constant_retention":
+        maximum_churn: Decimal | str = "not_applicable"
+        churn_constraint = "not_applicable"
+    else:
+        customer_contribution = customer_economics["contribution_per_period"]
+        if not isinstance(customer_contribution, Decimal) or not isinstance(selected_cac, Decimal):
+            maximum_churn = "indeterminate"
+            churn_constraint = "indeterminate"
+        elif selected_cac == 0:
+            maximum_churn = "not_meaningful_zero_cac"
+            churn_constraint = "not_meaningful_zero_cac"
+        elif customer_contribution < 0:
+            maximum_churn = "not_recoverable"
+            churn_constraint = "not_recoverable"
+        else:
+            raw_churn = customer_contribution / selected_cac
+            if raw_churn > 1:
+                maximum_churn = Decimal("1")
+                churn_constraint = "clamped_to_one"
+            else:
+                maximum_churn = raw_churn
+                churn_constraint = "within_probability_range"
+
+    diagnostic_flags = _diagnose(
+        scenario,
+        contribution=contribution,
+        capacity_status=capacity_status,
+        selected_cac=selected_cac,
+        customer_economics=customer_economics,
+    )
+
     missing_inputs, estimate_based = _input_quality(scenario)
     return {
         "name": scenario["name"],
@@ -449,10 +746,13 @@ def calculate_scenario(
             "minimum_price_for_positive_contribution": minimum_positive_price,
             "minimum_price_for_break_even_at_current_volume": minimum_break_even_price,
             "maximum_variable_cost_for_positive_contribution": maximum_variable_cost,
+            "maximum_cac_for_payback_target": maximum_cac,
+            "maximum_constant_churn_for_ltv_equal_cac": maximum_churn,
+            "maximum_constant_churn_constraint": churn_constraint,
         },
-        "cac": {},
-        "customer_economics": {},
-        "diagnostic_flags": [],
+        "cac": cac,
+        "customer_economics": customer_economics,
+        "diagnostic_flags": diagnostic_flags,
         "comparison_to_base": None,
     }
 
