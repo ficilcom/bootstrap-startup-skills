@@ -317,6 +317,139 @@ class ChargeFormulaTests(unittest.TestCase):
             ),
             "indeterminate",
         )
+
+
+class CurrentEconomicsTests(unittest.TestCase):
+    def test_calculates_current_counterfactual(self) -> None:
+        current = calculate(recurring_payload())["current"]
+
+        self.assertEqual(current["metrics"]["active_customers"], 105)
+        self.assertEqual(current["metrics"]["revenue"], 2_100_000)
+        self.assertEqual(current["metrics"]["contribution_profit"], 1_470_000)
+        self.assertEqual(current["metrics"]["contribution_after_fixed_costs"], 470_000)
+        self.assertEqual(current["metrics"]["contribution_margin"], Decimal("0.7"))
+        self.assertEqual(current["metrics"]["arpa"], 20_000)
+        self.assertEqual(current["metrics"]["total_usage_units"], 840)
+        self.assertEqual(current["metrics"]["capacity_status"], "within_capacity")
+
+    def test_percentage_and_quoted_current_plans(self) -> None:
+        payload = recurring_payload()
+        payload["plans"].append(percentage_plan(name="current-percentage", rate=0.025))
+        segment = payload["segments"][0]
+        segment["current_plan"] = "current-percentage"
+        segment["billable_amount_per_customer_per_period"] = money(400_000)
+        current = calculate(payload)["current"]
+        self.assertEqual(current["segments"][0]["current_charge"], 10_000)
+
+        payload = recurring_payload()
+        payload["plans"].append(
+            {"name": "current-quoted", "package_label": "Quoted", "pricing": {"model": "quoted"}}
+        )
+        segment = payload["segments"][0]
+        segment["current_plan"] = "current-quoted"
+        segment["current_quoted_charge_per_customer_per_period"] = money(50_000)
+        current = calculate(payload)["current"]
+        self.assertEqual(current["segments"][0]["current_charge"], 50_000)
+
+    def test_zero_revenue_has_typed_rates(self) -> None:
+        payload = recurring_payload()
+        payload["plans"][0]["pricing"]["flat_fee"] = money(0)
+
+        metrics = calculate(payload)["current"]["metrics"]
+
+        self.assertEqual(metrics["revenue"], 0)
+        self.assertEqual(metrics["contribution_margin"], "indeterminate_zero_revenue")
+        self.assertEqual(metrics["arpa"], 0)
+
+    def test_unknown_baseline_retention_is_not_zero(self) -> None:
+        payload = recurring_payload()
+        payload["segments"][0]["baseline_retention_rate"] = scalar(None, "unknown")
+
+        current = calculate(payload)["current"]
+
+        self.assertEqual(current["metrics"]["active_customers"], "indeterminate")
+        self.assertEqual(current["metrics"]["revenue"], "indeterminate")
+        self.assertTrue(
+            any(path.endswith("baseline_retention_rate") for path in current["missing_inputs"])
+        )
+
+
+class ProposalEconomicsTests(unittest.TestCase):
+    def test_calculates_migration_and_proposal_financials(self) -> None:
+        proposal = calculate(recurring_payload())["proposals"][0]
+        segment = proposal["segments"][0]
+
+        self.assertEqual(segment["migration_cohort"], 80)
+        self.assertEqual(segment["migrated_retained_customers"], 72)
+        self.assertEqual(segment["migration_losses"], 8)
+        self.assertEqual(segment["legacy_retained_customers"], 19)
+        self.assertEqual(segment["new_customers"], 11)
+        self.assertEqual(segment["manual_review_customers"], 10)
+        self.assertEqual(segment["effective_migrated_charge"], 22_500)
+        self.assertEqual(segment["target_new_customer_charge"], 25_000)
+        self.assertEqual(proposal["metrics"]["active_customers"], 102)
+        self.assertEqual(proposal["metrics"]["revenue"], 2_275_000)
+        self.assertEqual(proposal["metrics"]["contribution_profit"], 1_663_000)
+        self.assertEqual(proposal["metrics"]["contribution_after_fixed_costs"], 563_000)
+        self.assertEqual(proposal["deltas"]["contribution_after_fixed_costs"], 93_000)
+        self.assertEqual(proposal["one_time_implementation_costs"], 600_000)
+
+    def test_grandfathered_customers_remain_on_legacy_price(self) -> None:
+        payload = recurring_payload()
+        assignment = payload["proposals"][0]["assignments"][0]
+        assignment["migration_policy"] = "grandfathered"
+        assignment["migration_share_within_horizon"] = scalar(0)
+        assignment["manual_review_share"] = scalar(0)
+
+        segment = calculate(payload)["proposals"][0]["segments"][0]
+
+        self.assertEqual(segment["migrated_retained_customers"], 0)
+        self.assertEqual(segment["legacy_retained_customers"], 95)
+        self.assertEqual(segment["legacy_revenue"], 1_900_000)
+        self.assertEqual(segment["new_revenue"], 275_000)
+
+    def test_usage_and_cost_multipliers_change_target_economics(self) -> None:
+        payload = recurring_payload()
+        payload["plans"].append(usage_plan(name="target-usage"))
+        assignment = payload["proposals"][0]["assignments"][0]
+        assignment["target_plan"] = "target-usage"
+        assignment["usage_multiplier"] = scalar(1.25)
+        assignment["variable_cost_multiplier"] = scalar(1.10)
+
+        segment = calculate(payload)["proposals"][0]["segments"][0]
+
+        self.assertEqual(segment["proposal_usage_units_per_customer"], 10)
+        self.assertEqual(segment["target_new_customer_charge"], 20_000)
+        self.assertEqual(segment["effective_migrated_charge"], 18_000)
+        self.assertEqual(segment["proposal_variable_cost_per_customer"], 7_700)
+
+    def test_quoted_target_uses_assignment_quote(self) -> None:
+        payload = recurring_payload()
+        payload["plans"].append(
+            {"name": "target-quoted", "package_label": "Quoted", "pricing": {"model": "quoted"}}
+        )
+        assignment = payload["proposals"][0]["assignments"][0]
+        assignment["target_plan"] = "target-quoted"
+        assignment["quoted_charge_per_customer_per_period"] = money(30_000)
+
+        segment = calculate(payload)["proposals"][0]["segments"][0]
+
+        self.assertEqual(segment["target_new_customer_charge"], 30_000)
+        self.assertEqual(segment["effective_migrated_charge"], 27_000)
+
+    def test_unknown_migration_retention_makes_proposal_indeterminate(self) -> None:
+        payload = recurring_payload()
+        payload["proposals"][0]["assignments"][0]["retention_rate_after_migration"] = scalar(
+            None, "unknown"
+        )
+
+        proposal = calculate(payload)["proposals"][0]
+
+        self.assertEqual(proposal["metrics"]["active_customers"], "indeterminate")
+        self.assertEqual(proposal["metrics"]["revenue"], "indeterminate")
+        self.assertTrue(
+            any(path.endswith("retention_rate_after_migration") for path in proposal["missing_inputs"])
+        )
         plan = usage_plan()
         plan["pricing"]["maximum_fee"] = money(None, "unknown")
         self.assertEqual(

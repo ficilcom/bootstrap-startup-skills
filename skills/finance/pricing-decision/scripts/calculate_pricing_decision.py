@@ -404,16 +404,535 @@ def calculate_charge(
     return raw_charge
 
 
+def _input_quality(value: object, path: str = "") -> tuple[list[str], bool]:
+    missing: list[str] = []
+    estimate_based = False
+    if isinstance(value, dict):
+        if value.get("evidence") in EVIDENCE_STATES:
+            estimate_based = value.get("evidence") == "estimated"
+            raw = value.get("amount", value.get("value"))
+            if value.get("evidence") == "unknown" and raw is None:
+                missing.append(path)
+        else:
+            for key, child in value.items():
+                child_path = f"{path}.{key}" if path else key
+                child_missing, child_estimate = _input_quality(child, child_path)
+                missing.extend(child_missing)
+                estimate_based = estimate_based or child_estimate
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            child_missing, child_estimate = _input_quality(child, f"{path}[{index}]")
+            missing.extend(child_missing)
+            estimate_based = estimate_based or child_estimate
+    return missing, estimate_based
+
+
+def _is_numeric(value: object) -> bool:
+    return isinstance(value, (int, Decimal)) and not isinstance(value, bool)
+
+
+def _all_numeric(values: list[object]) -> bool:
+    return all(_is_numeric(value) for value in values)
+
+
+def _metric_totals(
+    segment_results: list[dict[str, object]],
+    field: str,
+) -> Decimal | str:
+    values = [segment[field] for segment in segment_results]
+    return sum(values, Decimal("0")) if _all_numeric(values) else "indeterminate"
+
+
+def _capacity_status(
+    total_usage: Decimal | str,
+    guardrails: dict[str, object],
+) -> tuple[Decimal | None, str]:
+    if "capacity_units_per_period" not in guardrails:
+        return None, "unassessed"
+    capacity = scalar_value(
+        guardrails["capacity_units_per_period"],
+        "guardrails.capacity_units_per_period",
+    )
+    if capacity is None or not isinstance(total_usage, Decimal):
+        return capacity, "unassessed"
+    return capacity, "beyond_capacity" if total_usage > capacity else "within_capacity"
+
+
+def _plan_maps(data: dict[str, object]) -> tuple[dict[str, dict[str, object]], dict[str, dict[str, object]]]:
+    plans = {plan["name"]: plan for plan in data["plans"]}
+    segments = {segment["name"]: segment for segment in data["segments"]}
+    return plans, segments
+
+
+def _current_segment(
+    segment: dict[str, object],
+    *,
+    plan: dict[str, object],
+    currency: str,
+) -> dict[str, object]:
+    name = segment["name"]
+    current_customers = scalar_value(
+        segment["current_customers"], f"segments.{name}.current_customers"
+    )
+    retention = scalar_value(
+        segment["baseline_retention_rate"],
+        f"segments.{name}.baseline_retention_rate",
+        rate=True,
+    )
+    new_customers = scalar_value(
+        segment["baseline_new_customers_per_period"],
+        f"segments.{name}.baseline_new_customers_per_period",
+    )
+    usage = scalar_value(
+        segment["usage_units_per_customer_per_period"],
+        f"segments.{name}.usage_units_per_customer_per_period",
+    )
+    billable_amount = money_value(
+        segment["billable_amount_per_customer_per_period"],
+        f"segments.{name}.billable_amount_per_customer_per_period",
+        currency,
+    )
+    quoted_charge = (
+        money_value(
+            segment["current_quoted_charge_per_customer_per_period"],
+            f"segments.{name}.current_quoted_charge_per_customer_per_period",
+            currency,
+        )
+        if "current_quoted_charge_per_customer_per_period" in segment
+        else None
+    )
+    fixed_variable_cost = money_value(
+        segment["fixed_variable_cost_per_customer_per_period"],
+        f"segments.{name}.fixed_variable_cost_per_customer_per_period",
+        currency,
+    )
+    usage_cost = money_value(
+        segment["variable_cost_per_usage_unit"],
+        f"segments.{name}.variable_cost_per_usage_unit",
+        currency,
+    )
+    current_charge = calculate_charge(
+        plan,
+        usage=usage,
+        billable_amount=billable_amount,
+        quoted_charge=quoted_charge,
+        currency=currency,
+    )
+    retained: Decimal | str = (
+        current_customers * retention
+        if current_customers is not None and retention is not None
+        else "indeterminate"
+    )
+    active: Decimal | str = (
+        retained + new_customers
+        if isinstance(retained, Decimal) and new_customers is not None
+        else "indeterminate"
+    )
+    cost_per_customer: Decimal | str = (
+        fixed_variable_cost + usage_cost * usage
+        if fixed_variable_cost is not None and usage_cost is not None and usage is not None
+        else "indeterminate"
+    )
+    revenue: Decimal | str = (
+        active * current_charge
+        if isinstance(active, Decimal) and isinstance(current_charge, Decimal)
+        else "indeterminate"
+    )
+    contribution: Decimal | str = (
+        revenue - active * cost_per_customer
+        if isinstance(revenue, Decimal)
+        and isinstance(active, Decimal)
+        and isinstance(cost_per_customer, Decimal)
+        else "indeterminate"
+    )
+    total_usage: Decimal | str = (
+        active * usage if isinstance(active, Decimal) and usage is not None else "indeterminate"
+    )
+    return {
+        "name": name,
+        "current_plan": segment["current_plan"],
+        "current_charge": current_charge,
+        "retained_existing_customers": retained,
+        "new_customers": new_customers,
+        "active_customers": active,
+        "usage_units_per_customer": usage,
+        "cost_per_customer": cost_per_customer,
+        "revenue": revenue,
+        "contribution_profit": contribution,
+        "total_usage_units": total_usage,
+    }
+
+
+def calculate_current(data: dict[str, object]) -> dict[str, object]:
+    plans, _ = _plan_maps(data)
+    currency = data["currency"]
+    segment_results = [
+        _current_segment(segment, plan=plans[segment["current_plan"]], currency=currency)
+        for segment in data["segments"]
+    ]
+    active = _metric_totals(segment_results, "active_customers")
+    revenue = _metric_totals(segment_results, "revenue")
+    contribution = _metric_totals(segment_results, "contribution_profit")
+    total_usage = _metric_totals(segment_results, "total_usage_units")
+    fixed = money_value(
+        data["current_fixed_costs_per_period"],
+        "current_fixed_costs_per_period",
+        currency,
+    )
+    after_fixed: Decimal | str = (
+        contribution - fixed
+        if isinstance(contribution, Decimal) and fixed is not None
+        else "indeterminate"
+    )
+    if not isinstance(revenue, Decimal) or not isinstance(contribution, Decimal):
+        contribution_margin: Decimal | str = "indeterminate"
+    elif revenue == 0:
+        contribution_margin = "indeterminate_zero_revenue"
+    else:
+        contribution_margin = contribution / revenue
+    if not isinstance(active, Decimal) or not isinstance(revenue, Decimal):
+        arpa: Decimal | str = "indeterminate"
+    elif active == 0:
+        arpa = "indeterminate_zero_active_customers"
+    else:
+        arpa = revenue / active
+    capacity, capacity_status = _capacity_status(total_usage, data.get("guardrails", {}))
+    missing, estimate_based = _input_quality(
+        {
+            "segments": data["segments"],
+            "current_fixed_costs_per_period": data["current_fixed_costs_per_period"],
+        }
+    )
+    return {
+        "estimate_based": estimate_based,
+        "missing_inputs": missing,
+        "segments": segment_results,
+        "metrics": {
+            "active_customers": active,
+            "revenue": revenue,
+            "contribution_profit": contribution,
+            "contribution_margin": contribution_margin,
+            "current_fixed_costs_per_period": fixed,
+            "contribution_after_fixed_costs": after_fixed,
+            "arpa": arpa,
+            "total_usage_units": total_usage,
+            "capacity_units_per_period": capacity,
+            "capacity_status": capacity_status,
+        },
+    }
+
+
+def _proposal_segment(
+    segment: dict[str, object],
+    assignment: dict[str, object],
+    *,
+    plans: dict[str, dict[str, object]],
+    current_segment: dict[str, object],
+    currency: str,
+) -> dict[str, object]:
+    name = segment["name"]
+    current_customers = scalar_value(
+        segment["current_customers"], f"segments.{name}.current_customers"
+    )
+    baseline_retention = scalar_value(
+        segment["baseline_retention_rate"],
+        f"segments.{name}.baseline_retention_rate",
+        rate=True,
+    )
+    baseline_new = scalar_value(
+        segment["baseline_new_customers_per_period"],
+        f"segments.{name}.baseline_new_customers_per_period",
+    )
+    baseline_usage = scalar_value(
+        segment["usage_units_per_customer_per_period"],
+        f"segments.{name}.usage_units_per_customer_per_period",
+    )
+    baseline_billable = money_value(
+        segment["billable_amount_per_customer_per_period"],
+        f"segments.{name}.billable_amount_per_customer_per_period",
+        currency,
+    )
+    fixed_variable_cost = money_value(
+        segment["fixed_variable_cost_per_customer_per_period"],
+        f"segments.{name}.fixed_variable_cost_per_customer_per_period",
+        currency,
+    )
+    usage_cost = money_value(
+        segment["variable_cost_per_usage_unit"],
+        f"segments.{name}.variable_cost_per_usage_unit",
+        currency,
+    )
+    parsed = {
+        field: scalar_value(
+            assignment[field],
+            f"assignments.{name}.{field}",
+            rate=kind == "rate",
+        )
+        for field, kind in ASSIGNMENT_SCALARS.items()
+    }
+    migration_share = parsed["migration_share_within_horizon"]
+    review_share = parsed["manual_review_share"]
+    migration_retention = parsed["retention_rate_after_migration"]
+    new_multiplier = parsed["new_customer_multiplier"]
+    usage_multiplier = parsed["usage_multiplier"]
+    billable_multiplier = parsed["billable_amount_multiplier"]
+    cost_multiplier = parsed["variable_cost_multiplier"]
+    discount = parsed["transition_discount_rate"]
+
+    migration_cohort: Decimal | str = (
+        current_customers * migration_share
+        if current_customers is not None and migration_share is not None
+        else "indeterminate"
+    )
+    manual_review: Decimal | str = (
+        current_customers * review_share
+        if current_customers is not None and review_share is not None
+        else "indeterminate"
+    )
+    migrated_retained: Decimal | str = (
+        migration_cohort * migration_retention
+        if isinstance(migration_cohort, Decimal) and migration_retention is not None
+        else "indeterminate"
+    )
+    migration_losses: Decimal | str = (
+        migration_cohort * (Decimal("1") - migration_retention)
+        if isinstance(migration_cohort, Decimal) and migration_retention is not None
+        else "indeterminate"
+    )
+    legacy_retained: Decimal | str = (
+        (current_customers - migration_cohort) * baseline_retention
+        if current_customers is not None
+        and isinstance(migration_cohort, Decimal)
+        and baseline_retention is not None
+        else "indeterminate"
+    )
+    new_customers: Decimal | str = (
+        baseline_new * new_multiplier
+        if baseline_new is not None and new_multiplier is not None
+        else "indeterminate"
+    )
+    active: Decimal | str = (
+        migrated_retained + legacy_retained + new_customers
+        if _all_numeric([migrated_retained, legacy_retained, new_customers])
+        else "indeterminate"
+    )
+    proposal_usage: Decimal | str = (
+        baseline_usage * usage_multiplier
+        if baseline_usage is not None and usage_multiplier is not None
+        else "indeterminate"
+    )
+    proposal_billable: Decimal | str = (
+        baseline_billable * billable_multiplier
+        if baseline_billable is not None and billable_multiplier is not None
+        else "indeterminate"
+    )
+    quoted_charge = (
+        money_value(
+            assignment["quoted_charge_per_customer_per_period"],
+            f"assignments.{name}.quoted_charge_per_customer_per_period",
+            currency,
+        )
+        if "quoted_charge_per_customer_per_period" in assignment
+        else None
+    )
+    target_charge = calculate_charge(
+        plans[assignment["target_plan"]],
+        usage=proposal_usage if isinstance(proposal_usage, Decimal) else None,
+        billable_amount=proposal_billable if isinstance(proposal_billable, Decimal) else None,
+        quoted_charge=quoted_charge,
+        currency=currency,
+    )
+    effective_migrated_charge: Decimal | str = (
+        target_charge * (Decimal("1") - discount)
+        if isinstance(target_charge, Decimal) and discount is not None
+        else "indeterminate"
+    )
+    current_charge = current_segment["current_charge"]
+    legacy_revenue: Decimal | str = (
+        legacy_retained * current_charge
+        if isinstance(legacy_retained, Decimal) and isinstance(current_charge, Decimal)
+        else "indeterminate"
+    )
+    migrated_revenue: Decimal | str = (
+        migrated_retained * effective_migrated_charge
+        if isinstance(migrated_retained, Decimal)
+        and isinstance(effective_migrated_charge, Decimal)
+        else "indeterminate"
+    )
+    new_revenue: Decimal | str = (
+        new_customers * target_charge
+        if isinstance(new_customers, Decimal) and isinstance(target_charge, Decimal)
+        else "indeterminate"
+    )
+    revenue: Decimal | str = (
+        legacy_revenue + migrated_revenue + new_revenue
+        if _all_numeric([legacy_revenue, migrated_revenue, new_revenue])
+        else "indeterminate"
+    )
+    proposal_cost: Decimal | str = (
+        (fixed_variable_cost + usage_cost * proposal_usage) * cost_multiplier
+        if fixed_variable_cost is not None
+        and usage_cost is not None
+        and isinstance(proposal_usage, Decimal)
+        and cost_multiplier is not None
+        else "indeterminate"
+    )
+    contribution: Decimal | str = (
+        revenue - active * proposal_cost
+        if isinstance(revenue, Decimal)
+        and isinstance(active, Decimal)
+        and isinstance(proposal_cost, Decimal)
+        else "indeterminate"
+    )
+    total_usage: Decimal | str = (
+        active * proposal_usage
+        if isinstance(active, Decimal) and isinstance(proposal_usage, Decimal)
+        else "indeterminate"
+    )
+    return {
+        "name": name,
+        "current_plan": segment["current_plan"],
+        "target_plan": assignment["target_plan"],
+        "migration_policy": assignment["migration_policy"],
+        "retention_rate_after_migration": migration_retention,
+        "migration_cohort": migration_cohort,
+        "migrated_retained_customers": migrated_retained,
+        "migration_losses": migration_losses,
+        "legacy_retained_customers": legacy_retained,
+        "new_customers": new_customers,
+        "manual_review_customers": manual_review,
+        "current_charge": current_charge,
+        "target_new_customer_charge": target_charge,
+        "effective_migrated_charge": effective_migrated_charge,
+        "proposal_usage_units_per_customer": proposal_usage,
+        "proposal_variable_cost_per_customer": proposal_cost,
+        "active_customers": active,
+        "legacy_revenue": legacy_revenue,
+        "migrated_revenue": migrated_revenue,
+        "new_revenue": new_revenue,
+        "revenue": revenue,
+        "contribution_profit": contribution,
+        "total_usage_units": total_usage,
+    }
+
+
+def _numeric_deltas(
+    proposal_metrics: dict[str, object],
+    current_metrics: dict[str, object],
+) -> dict[str, Decimal]:
+    fields = {
+        "active_customers",
+        "revenue",
+        "contribution_profit",
+        "contribution_after_fixed_costs",
+        "arpa",
+        "total_usage_units",
+    }
+    return {
+        field: proposal_metrics[field] - current_metrics[field]
+        for field in fields
+        if _is_numeric(proposal_metrics[field]) and _is_numeric(current_metrics[field])
+    }
+
+
+def calculate_proposal(
+    data: dict[str, object],
+    proposal: dict[str, object],
+    current: dict[str, object],
+) -> dict[str, object]:
+    plans, segments = _plan_maps(data)
+    current_segments = {segment["name"]: segment for segment in current["segments"]}
+    assignments = {assignment["segment"]: assignment for assignment in proposal["assignments"]}
+    segment_results = [
+        _proposal_segment(
+            segment,
+            assignments[name],
+            plans=plans,
+            current_segment=current_segments[name],
+            currency=data["currency"],
+        )
+        for name, segment in segments.items()
+    ]
+    active = _metric_totals(segment_results, "active_customers")
+    revenue = _metric_totals(segment_results, "revenue")
+    contribution = _metric_totals(segment_results, "contribution_profit")
+    total_usage = _metric_totals(segment_results, "total_usage_units")
+    current_fixed = money_value(
+        data["current_fixed_costs_per_period"],
+        "current_fixed_costs_per_period",
+        data["currency"],
+    )
+    incremental_fixed = money_value(
+        proposal["incremental_fixed_costs_per_period"],
+        f"proposals.{proposal['name']}.incremental_fixed_costs_per_period",
+        data["currency"],
+    )
+    one_time = money_value(
+        proposal["one_time_implementation_costs"],
+        f"proposals.{proposal['name']}.one_time_implementation_costs",
+        data["currency"],
+    )
+    after_fixed: Decimal | str = (
+        contribution - current_fixed - incremental_fixed
+        if isinstance(contribution, Decimal)
+        and current_fixed is not None
+        and incremental_fixed is not None
+        else "indeterminate"
+    )
+    if not isinstance(revenue, Decimal) or not isinstance(contribution, Decimal):
+        contribution_margin: Decimal | str = "indeterminate"
+    elif revenue == 0:
+        contribution_margin = "indeterminate_zero_revenue"
+    else:
+        contribution_margin = contribution / revenue
+    if not isinstance(active, Decimal) or not isinstance(revenue, Decimal):
+        arpa: Decimal | str = "indeterminate"
+    elif active == 0:
+        arpa = "indeterminate_zero_active_customers"
+    else:
+        arpa = revenue / active
+    capacity, capacity_status = _capacity_status(total_usage, data.get("guardrails", {}))
+    metrics = {
+        "active_customers": active,
+        "revenue": revenue,
+        "contribution_profit": contribution,
+        "contribution_margin": contribution_margin,
+        "current_fixed_costs_per_period": current_fixed,
+        "incremental_fixed_costs_per_period": incremental_fixed,
+        "contribution_after_fixed_costs": after_fixed,
+        "arpa": arpa,
+        "total_usage_units": total_usage,
+        "capacity_units_per_period": capacity,
+        "capacity_status": capacity_status,
+    }
+    missing, estimate_based = _input_quality(
+        {"proposal": proposal, "segments": data["segments"]}
+    )
+    return {
+        "name": proposal["name"],
+        "validation_stage": proposal["validation_stage"],
+        "change_summary": proposal["change_summary"],
+        "estimate_based": estimate_based,
+        "missing_inputs": missing,
+        "segments": segment_results,
+        "metrics": metrics,
+        "deltas": _numeric_deltas(metrics, current["metrics"]),
+        "one_time_implementation_costs": one_time,
+    }
+
+
 def calculate(payload: dict[str, object]) -> dict[str, object]:
     data = validate(payload)
+    current = calculate_current(data)
+    proposals = [calculate_proposal(data, proposal, current) for proposal in data["proposals"]]
     return {
         "mode": data["mode"],
         "as_of_date": data["as_of_date"],
         "currency": data["currency"],
         "analysis_period": data["analysis_period"],
         "usage_unit_name": data["usage_unit_name"],
-        "current": {},
-        "proposals": [],
+        "current": current,
+        "proposals": proposals,
         "sensitivity_cases": [],
     }
 
