@@ -188,6 +188,7 @@ Each scenario follows this structure:
     "decision_cac_scope_complete": true,
     "selected_pool_matches_customer_cohort": true,
     "selected_pool_included_in_fixed_costs": true,
+    "marginal_new_customers": {"value": 10, "evidence": "estimated"},
     "costs": {
       "paid": {"amount": 240000, "evidence": "confirmed"},
       "blended": {"amount": 420000, "evidence": "reported"},
@@ -205,7 +206,7 @@ Each scenario follows this structure:
 }
 ```
 
-`capacity_units` and targets are optional. `units_per_customer_per_period` is optional when the selected LTV/payback method does not need it. Acquisition cost keys may be omitted when unavailable, but the selected basis must be present. `decision_cac_scope_complete` records whether the selected basis includes every acquisition cost the user considers necessary for the decision. `selected_pool_matches_customer_cohort` records whether the numerator costs and `new_customers` denominator represent the same acquisition cohort or a justified lagged attribution. `analysis_period` and every `period_unit` use one of `week`, `month`, `quarter`, or `year` and must match for arithmetic comparisons.
+`capacity_units` and targets are optional. `units_per_customer_per_period` is optional when the selected LTV/payback method does not need it. Acquisition cost keys may be omitted when unavailable, but the selected basis must be present. `marginal_new_customers` is required when a marginal cost pool is supplied and represents incremental customers attributable to the incremental spend; other CAC bases use `drivers.new_customers`. `decision_cac_scope_complete` records whether the selected basis includes every acquisition cost the user considers necessary for the decision. `selected_pool_matches_customer_cohort` records whether the numerator costs and customer denominator represent the same acquisition cohort or a justified lagged attribution. `analysis_period` and every `period_unit` use one of `week`, `month`, `quarter`, or `year` and must match for arithmetic comparisons.
 
 Mode-specific `ltv_model` objects replace the constant-retention fields as follows:
 
@@ -271,10 +272,16 @@ Supported bases are:
 - `fully_loaded`: blended cost plus included acquisition labor, tools, agencies, and allocated acquisition overhead.
 - `marginal`: incremental spend divided by incremental new customers for a defined change.
 
-For each supplied basis:
+For each supplied non-marginal basis:
 
 ```text
 cac[basis] = acquisition_costs[basis] ÷ new_customers
+```
+
+For marginal CAC:
+
+```text
+cac[marginal] = acquisition_costs[marginal] ÷ marginal_new_customers
 ```
 
 The input selects one `decision_cac_basis` for payback, LTV:CAC, and diagnosis. Other bases remain visible comparisons. If new customers are zero, CAC is indeterminate rather than zero or infinity. The report must show the numerator scope, customer cohort, and timing alignment. A calculated CAC whose scope is incomplete or whose cost/customer cohort is misaligned remains visible but cannot support `profitable_to_scale`.
@@ -447,6 +454,7 @@ The script must reject:
 - a non-recurring mode using constant-retention LTV;
 - inconsistent period labels for contribution, churn, cohort, and payback;
 - selected CAC bases absent from the acquisition-cost input;
+- a marginal acquisition-cost pool without `marginal_new_customers`;
 - mixed currencies; and
 - hybrid streams combined in one run.
 

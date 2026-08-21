@@ -54,7 +54,7 @@ def test_rejects_constant_retention_for_transactional_mode(self):
         calculate(payload)
 ```
 
-Also test invalid dates/currencies, mixed optional amount currency, rates above 1, negative values, duplicate scenario names, missing selected CAC basis, non-boolean scope flags, non-integer customer counts, and period-unit mismatch.
+Also test invalid dates/currencies, mixed optional amount currency, rates above 1, negative values, duplicate scenario names, missing selected CAC basis, marginal cost without `marginal_new_customers`, non-boolean scope flags, non-integer customer counts, and period-unit mismatch.
 
 - [ ] **Step 2: Run the test file and confirm import failure**
 
@@ -186,7 +186,7 @@ Expected: CAC, customer, and diagnostic fields are missing.
 
 - [ ] **Step 3: Implement CAC and payback**
 
-For every supplied pool, divide by known positive new customers. Return `indeterminate_zero_new_customers` when the known count is zero and `indeterminate` for an unknown count or pool. Compute customer-period contribution from contribution per unit and units per customer per period.
+For paid, blended, and fully loaded pools, divide by known positive `new_customers`. Divide marginal cost by `marginal_new_customers`. Return `indeterminate_zero_new_customers` or `indeterminate_zero_marginal_new_customers` when the applicable known count is zero, and `indeterminate` for an unknown count or pool. Compute customer-period contribution from contribution per unit and units per customer per period.
 
 For non-cohort payback, return a number, `not_recoverable`, or `indeterminate`. For observed cohorts, divide each period contribution total by original cohort customers, accumulate, and return the first one-based period reaching selected CAC or `not_observed_within_horizon`.
 
