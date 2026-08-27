@@ -22,7 +22,9 @@ def main() -> int:
     for test_file in test_files:
         relative = test_file.relative_to(ROOT)
         print(f"\n==> {relative}", flush=True)
-        completed = subprocess.run([sys.executable, str(test_file)], cwd=ROOT)
+        completed = subprocess.run(
+            [sys.executable, str(test_file)], cwd=ROOT, stdin=subprocess.DEVNULL
+        )
         if completed.returncode != 0:
             failures.append(relative)
 

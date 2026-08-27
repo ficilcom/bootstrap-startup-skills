@@ -7,6 +7,7 @@ import copy
 import io
 import json
 import runpy
+import sys
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from decimal import Decimal
@@ -211,20 +212,24 @@ class CliTests(unittest.TestCase):
     def test_main_writes_json_and_validation_errors_to_stderr(self) -> None:
         output = io.StringIO()
         error = io.StringIO()
-        with redirect_stdout(output), redirect_stderr(error):
-            code = main(["-"])
+        original_stdin = sys.stdin
+        try:
+            sys.stdin = io.StringIO("{")
+            with redirect_stdout(output), redirect_stderr(error):
+                code = main(["-"])
+        finally:
+            sys.stdin = original_stdin
         self.assertEqual(code, 2)
         self.assertIn("error:", error.getvalue())
 
         data = json.dumps(payload())
-        original_stdin = __import__("sys").stdin
         try:
-            __import__("sys").stdin = io.StringIO(data)
+            sys.stdin = io.StringIO(data)
             output = io.StringIO()
             with redirect_stdout(output):
                 code = main(["-"])
         finally:
-            __import__("sys").stdin = original_stdin
+            sys.stdin = original_stdin
         self.assertEqual(code, 0)
         self.assertEqual(json.loads(output.getvalue())["currency"], "JPY")
 
