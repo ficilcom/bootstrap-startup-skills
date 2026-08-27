@@ -19,3 +19,5 @@ jobs:
           python-version: "3.12"
       - name: Validate Agent Skills
         run: python3 scripts/validate_skills.py
+      - name: Run tests
+        run: python3 scripts/run_tests.py

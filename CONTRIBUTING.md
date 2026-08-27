@@ -54,6 +54,12 @@ python3 scripts/validate_skills.py
 
 For a new or substantially changed skill, also test at least one realistic request and inspect the actual output rather than checking only headings or wording.
 
+Deterministic script tests belong at `tests/<category>/<skill-name>/`, not inside the installable skill directory. Run the complete test suite with:
+
+```bash
+python3 scripts/run_tests.py
+```
+
 ## Review checklist
 
 - The skill solves a specific, recurring founder task.

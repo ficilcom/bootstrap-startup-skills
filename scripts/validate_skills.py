@@ -96,6 +96,18 @@ def main() -> int:
         return 0
 
     problems = [problem for path in skill_files for problem in validate_skill(path)]
+    embedded_tests = sorted(SKILLS_DIR.glob("**/test_*.py"))
+    problems.extend(
+        f"{path.relative_to(ROOT)}: development tests must live under tests/"
+        for path in embedded_tests
+    )
+    for category in sorted(CATEGORIES):
+        category_dir = SKILLS_DIR / category
+        keep_file = category_dir / ".gitkeep"
+        if keep_file.exists() and any(path.name != ".gitkeep" for path in category_dir.iterdir()):
+            problems.append(
+                f"{keep_file.relative_to(ROOT)}: remove .gitkeep from a non-empty category"
+            )
     if problems:
         print("Skill validation failed:", file=sys.stderr)
         for problem in problems:

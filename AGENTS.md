@@ -21,4 +21,4 @@ This repository contains portable Agent Skills for bootstrapped and capital-effi
 
 ## Verification
 
-Run `python3 scripts/validate_skills.py` after changing any skill. Exercise new or substantially revised skills with realistic requests when feasible.
+Run `python3 scripts/validate_skills.py` and `python3 scripts/run_tests.py` after changing any skill. Exercise new or substantially revised skills with realistic requests when feasible.
