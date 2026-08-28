@@ -44,6 +44,20 @@ Many skills in this repository touch consequential business decisions. They shou
 - request authorization immediately before any external submission, transaction, message, or other consequential mutation;
 - avoid collecting or exposing sensitive company or personal data that the task does not require.
 
+## Decision quality
+
+When a skill supports a consequential operating decision, use these criteria instead of targeting a particular file length:
+
+- separate a lightweight core analysis from advanced inputs when requiring every detail would block useful work;
+- preserve the distinction between `confirmed`, `reported`, `estimated`, and `unknown`, and never encode an unknown value as zero;
+- identify unknowns that could change the decision, while allowing unaffected calculations to remain usable;
+- compare meaningful scenarios or sensitivities when a single assumption can reverse the result;
+- keep economic rankings separate from requirement gates, qualitative risks, and final recommendations;
+- state the evidence, counterevidence, validation step, stopping condition, owner, and review date for proposed actions;
+- expose a clear authorization boundary immediately before external communication, transactions, production changes, or changes to customer and employee commitments.
+
+If a deterministic helper supports both core and advanced analysis, preserve existing input behavior where practical. An optional `analysis_mode` may default to `core`; advanced results should report whether the analysis is complete, partial, or indeterminate and list decision-changing unknowns.
+
 ## Validate
 
 Run the repository checks before submitting a change:

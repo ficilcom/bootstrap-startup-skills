@@ -33,7 +33,74 @@ def payload() -> dict[str, object]:
     }
 
 
+def advanced_payload() -> dict[str, object]:
+    data = payload()
+    data["analysis_mode"] = "advanced"
+    data["observed_weeks"] = 2
+    data["planning_horizon_weeks"] = 8
+    data["fragmentation_threshold_per_week"] = scalar(4)
+    transfers = {
+        "customer-discovery": {"frequency_per_week": scalar(3), "context_switches": scalar(10), "outcome_metric": "validated interviews", "transfer": {"transferable_rate": scalar(0), "initial_transition_hours": scalar(0), "weekly_oversight_hours": scalar(0), "recipient_capacity_hours": scalar(0), "procedure_status": "ready", "quality_status": "ready", "authority_status": "ready"}},
+        "invoice-entry": {"frequency_per_week": scalar(4), "context_switches": scalar(4), "outcome_metric": "entries completed accurately", "transfer": {"transferable_rate": scalar(1), "initial_transition_hours": scalar(6), "weekly_oversight_hours": scalar(0.5), "recipient_capacity_hours": scalar(5), "procedure_status": "ready", "quality_status": "ready", "authority_status": "ready"}},
+        "status-meetings": {"frequency_per_week": scalar(3), "context_switches": scalar(6), "outcome_metric": "decisions unblocked", "transfer": {"transferable_rate": scalar(1), "initial_transition_hours": scalar(20), "weekly_oversight_hours": scalar(1), "recipient_capacity_hours": scalar(3), "procedure_status": "ready", "quality_status": "ready", "authority_status": "ready"}},
+    }
+    for activity in data["activities"]:
+        activity.update(transfers[activity["name"]])
+    return data
+
+
 class FounderTimeTests(unittest.TestCase):
+    def test_core_mode_adds_quality_without_changing_candidates(self) -> None:
+        result = MODULE.calculate(payload())
+
+        self.assertEqual(result["analysis_quality"]["mode"], "core")
+        self.assertEqual(result["analysis_quality"]["status"], "complete")
+        self.assertEqual(result["summary"]["reclaimable_hours"], 14)
+        self.assertEqual(result["delegate_candidates"], ["invoice-entry"])
+
+    def test_advanced_mode_calculates_transition_economics(self) -> None:
+        result = MODULE.calculate(advanced_payload())
+        activities = {item["name"]: item for item in result["activities"]}
+        invoice = activities["invoice-entry"]["transition_economics"]
+
+        self.assertEqual(activities["invoice-entry"]["weekly_hours"], 4)
+        self.assertEqual(invoice["gross_reclaimable_hours"], 32)
+        self.assertEqual(invoice["net_reclaimable_hours"], 22)
+        self.assertEqual(invoice["payback_weeks"], 1.714286)
+        self.assertEqual(invoice["status"], "viable")
+
+    def test_advanced_mode_blocks_or_rejects_unsafe_and_uneconomic_transitions(self) -> None:
+        result = MODULE.calculate(advanced_payload())
+        activities = {item["name"]: item for item in result["activities"]}
+
+        self.assertEqual(activities["customer-discovery"]["transition_economics"]["status"], "blocked")
+        self.assertIn("founder_required", activities["customer-discovery"]["transition_gates"])
+        self.assertEqual(activities["status-meetings"]["transition_economics"]["net_reclaimable_hours"], -4)
+        self.assertEqual(activities["status-meetings"]["transition_economics"]["status"], "uneconomic")
+
+    def test_advanced_mode_protects_fragmented_high_value_work(self) -> None:
+        activity = {item["name"]: item for item in MODULE.calculate(advanced_payload())["activities"]}["customer-discovery"]
+
+        self.assertEqual(activity["context_switches_per_week"], 5)
+        self.assertIn("focus_fragmentation", activity["flags"])
+        self.assertIn("customer-discovery", MODULE.calculate(advanced_payload())["protect_candidates"])
+
+    def test_advanced_mode_rejects_bad_horizons_rates_and_readiness(self) -> None:
+        data = advanced_payload()
+        data["observed_weeks"] = 0
+        with self.assertRaisesRegex(ValueError, "observed_weeks"):
+            MODULE.calculate(data)
+
+        data = advanced_payload()
+        data["activities"][1]["transfer"]["transferable_rate"] = scalar(1.1)
+        with self.assertRaisesRegex(ValueError, "between 0 and 1"):
+            MODULE.calculate(data)
+
+        data = advanced_payload()
+        data["activities"][1]["transfer"]["procedure_status"] = "done"
+        with self.assertRaisesRegex(ValueError, "procedure_status"):
+            MODULE.calculate(data)
+
     def test_calculates_time_shares_focus_and_remaining_capacity(self) -> None:
         result = MODULE.calculate(payload())
         activities = {item["name"]: item for item in result["activities"]}

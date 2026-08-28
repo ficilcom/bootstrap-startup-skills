@@ -1,6 +1,6 @@
 ---
 name: offer-portfolio-review
-description: Compare products and services using contribution, delivery capacity, demand evidence, strategic fit, and exit constraints. Use when deciding which offers to grow, repair, test, bundle, or retire; do not use as authorization to discontinue an offer or change customer commitments.
+description: Compare products and services using contribution, capacity, demand evidence, downside scenarios, offer relationships, strategic fit, and exit gates. Use when deciding which offers to grow, repair, test, bundle, hold, or consider retiring; do not use as authorization to discontinue an offer or change customer commitments.
 license: MIT
 metadata:
   author: ficilcom
@@ -13,9 +13,9 @@ metadata:
 ## 進め方
 
 1. [インテークと判断方法](references/intake-and-method.md)を読み、同じ期間・通貨・変動費範囲で商品別の売上、変動費、提供工数、需要証拠、戦略適合を集める。
-2. 入力を `confirmed`、`reported`、`estimated`、`unknown` に分ける。共通費を根拠なく商品へ割り振らず、共有工数やバンドル売上は配賦規則を明示する。
+2. 入力を `confirmed`、`reported`、`estimated`、`unknown` に分ける。需要、商品間関係、感度、退出制約まで判断する場合は `advanced` を選び、[判断ルール](references/decision-rules.md)を読む。共通費を根拠なく商品へ割り振らない。
 3. [計算モデル](references/calculation-model.md)に従い匿名化JSONを作り、スキルのルートで `python3 scripts/analyze_offer_portfolio.py <input.json>` を実行する。
-4. 貢献利益、利益率、提供1時間当たり貢献、能力消費、戦略適合、需要・契約上の制約を並べる。自動順位は定量化できた経済性だけであり、最終判断ではない。
+4. 貢献利益、利益率、提供1時間当たり貢献、能力消費、需要、シナリオ、商品間関係、戦略適合、退出ゲートを並べる。経済順位と判断シグナルを推奨や自動実行にしない。
 5. [報告書形式](references/report-format.md)で `grow`、`repair`、`test`、`bundle`、`hold`、`retire candidate` を示し、必要な検証と再判断日を置く。
 
 ## 判断上の制約

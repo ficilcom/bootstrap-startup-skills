@@ -1,6 +1,6 @@
 ---
 name: business-continuity-check
-description: Map critical people, customers, vendors, systems, facilities, data, and processes; compare recovery time with tolerated downtime; and expose single points and blast radius. Use when prioritizing continuity tests and fallback plans; do not use as incident-response authorization.
+description: Map critical dependencies, compare recovery and data-loss capability with tolerated limits, test compound failures and alternatives, and prioritize continuity work. Use when reviewing business continuity, recovery order, fallback capacity, or single points of failure; do not use as incident-response authorization.
 license: MIT
 metadata:
   author: ficilcom
@@ -13,10 +13,10 @@ metadata:
 ## 進め方
 
 1. [インテークと分析方法](references/intake-and-method.md)を読み、重要な顧客提供・資金・法的義務から逆向きに依存関係を集める。
-2. 各依存に重要度、停止確率、最大許容停止時間、想定復旧時間、所有者、代替、依存先を置き、`confirmed`、`reported`、`estimated`、`unknown` に分ける。
+2. 各依存に重要度、停止確率、最大許容停止時間、想定復旧時間、所有者、代替、依存先を置き、`confirmed`、`reported`、`estimated`、`unknown` に分ける。RPO、代替能力、復旧試験、複合障害まで判断する場合は `advanced` を選び、[復旧と試験](references/recovery-and-testing.md)を読む。
 3. [計算モデル](references/calculation-model.md)に従い匿名化JSONを作り、スキルのルートで `python3 scripts/analyze_continuity.py <input.json>` を実行する。
-4. 復旧超過、検証済み代替の欠如、所有者不在、直接・間接の影響範囲を確認する。モデル順位を障害発生予測にしない。
-5. [報告書形式](references/report-format.md)で優先リスク、暫定手順、復旧条件、検証日、改善所有者、再評価日を示す。
+4. 復旧・データ損失・代替能力の超過、試験結果、所有者、復旧順序、直接・間接の影響範囲を確認する。確率順位だけで優先度を下げず、`analysis_quality` の不明点を残す。
+5. [報告書形式](references/report-format.md)で優先リスク、暫定手順、復旧条件、試験計画、改善所有者、再評価日を示す。
 
 ## 判断上の制約
 

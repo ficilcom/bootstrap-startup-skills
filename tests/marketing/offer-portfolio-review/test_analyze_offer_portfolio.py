@@ -50,7 +50,80 @@ def payload() -> dict[str, object]:
     }
 
 
+def advanced_payload() -> dict[str, object]:
+    data = payload()
+    data["analysis_mode"] = "advanced"
+    data["as_of_date"] = "2026-08-27"
+    data["offers"][0].update({
+        "demand": {"qualified_pipeline": money(500_000), "backlog_units": scalar(3), "lost_due_capacity_units": scalar(1), "renewal_rate": scalar(0.8)},
+        "exit_constraints": {"active_contracts": scalar(2), "committed_revenue": money(200_000), "transition_cost": money(50_000), "earliest_exit_date": "2027-01-01"},
+    })
+    data["offers"][1].update({
+        "demand": {"qualified_pipeline": money(None, "unknown"), "backlog_units": scalar(None, "unknown"), "lost_due_capacity_units": scalar(0), "renewal_rate": scalar(None, "unknown")},
+        "exit_constraints": {"active_contracts": scalar(0), "committed_revenue": money(0), "transition_cost": money(0), "earliest_exit_date": "2026-08-01"},
+    })
+    data["relationships"] = [{"source": "workshop", "target": "advisory", "type": "cross_sell", "evidence": "reported"}]
+    data["scenarios"] = [{
+        "name": "downside",
+        "offer_adjustments": [
+            {"name": "advisory", "revenue_factor": scalar(0.8, "estimated"), "variable_cost_factor": scalar(1.2, "estimated"), "delivery_hours_factor": scalar(1.1, "estimated")},
+            {"name": "workshop", "revenue_factor": scalar(1), "variable_cost_factor": scalar(1), "delivery_hours_factor": scalar(1)},
+        ],
+    }]
+    return data
+
+
 class OfferPortfolioTests(unittest.TestCase):
+    def test_core_mode_adds_quality_without_changing_economics(self) -> None:
+        result = MODULE.calculate(payload())
+
+        self.assertEqual(result["analysis_quality"]["mode"], "core")
+        self.assertEqual(result["analysis_quality"]["status"], "complete")
+        self.assertEqual(result["offers"][0]["contribution"], 700_000)
+
+    def test_advanced_mode_reports_demand_exit_gates_and_decision_signals(self) -> None:
+        result = MODULE.calculate(advanced_payload())
+        offers = {item["name"]: item for item in result["offers"]}
+
+        self.assertEqual(offers["advisory"]["exit_gate"], "blocked")
+        self.assertIn("grow_candidate", offers["advisory"]["decision_signals"])
+        self.assertEqual(offers["workshop"]["demand_status"], "unknown")
+        self.assertIn("test_candidate", offers["workshop"]["decision_signals"])
+        self.assertEqual(result["analysis_quality"]["status"], "partial")
+
+    def test_advanced_scenario_recalculates_economics_and_capacity(self) -> None:
+        scenario = MODULE.calculate(advanced_payload())["scenario_metrics"][0]
+        advisory = scenario["offers"]["advisory"]
+
+        self.assertEqual(advisory["contribution"], 440_000)
+        self.assertEqual(advisory["contribution_per_delivery_hour"], 4_000)
+        self.assertEqual(scenario["total_delivery_hours"], 160)
+        self.assertEqual(scenario["capacity_gap_hours"], 0)
+
+    def test_advanced_relationships_remain_separate_from_offer_profit(self) -> None:
+        result = MODULE.calculate(advanced_payload())
+
+        self.assertEqual(result["relationships"][0]["type"], "cross_sell")
+        self.assertIn("relationship_not_verified", result["relationships"][0]["flags"])
+        self.assertIn("bundle_candidate", {item["name"]: item for item in result["offers"]}["workshop"]["decision_signals"])
+        self.assertEqual(result["offers"][1]["contribution"], 300_000)
+
+    def test_advanced_mode_rejects_unknown_relationships_bad_factors_and_dates(self) -> None:
+        data = advanced_payload()
+        data["relationships"][0]["target"] = "missing"
+        with self.assertRaisesRegex(ValueError, "unknown offer"):
+            MODULE.calculate(data)
+
+        data = advanced_payload()
+        data["scenarios"][0]["offer_adjustments"][0]["revenue_factor"] = scalar(-1)
+        with self.assertRaisesRegex(ValueError, "non-negative"):
+            MODULE.calculate(data)
+
+        data = advanced_payload()
+        data["offers"][0]["exit_constraints"]["earliest_exit_date"] = "01-01-2027"
+        with self.assertRaisesRegex(ValueError, "ISO date"):
+            MODULE.calculate(data)
+
     def test_calculates_offer_contribution_margin_and_hour_economics(self) -> None:
         result = MODULE.calculate(payload())
         offers = {item["name"]: item for item in result["offers"]}

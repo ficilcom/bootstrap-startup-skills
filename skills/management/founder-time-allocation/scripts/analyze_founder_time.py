@@ -11,6 +11,8 @@ from typing import Any
 
 
 EVIDENCE_STATES = {"confirmed", "reported", "estimated", "unknown"}
+ANALYSIS_MODES = {"core", "advanced"}
+READINESS_STATES = {"ready", "partial", "missing", "unknown"}
 
 
 def _object(value: object, path: str) -> dict[str, Any]:
@@ -71,8 +73,40 @@ def _number(value: Decimal | None) -> int | float | None:
     return int(rounded) if rounded == rounded.to_integral() else float(rounded)
 
 
+def _analysis_mode(value: object) -> str:
+    mode = "core" if value is None else value
+    if mode not in ANALYSIS_MODES:
+        raise ValueError("analysis_mode must be core or advanced")
+    return str(mode)
+
+
+def _positive_integer(value: object, path: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{path} must be a positive integer")
+    return value
+
+
+def _evidence_counts(value: object) -> dict[str, int]:
+    counts = {state: 0 for state in sorted(EVIDENCE_STATES)}
+
+    def visit(item: object) -> None:
+        if isinstance(item, dict):
+            evidence = item.get("evidence")
+            if evidence in counts:
+                counts[evidence] += 1
+            for nested in item.values():
+                visit(nested)
+        elif isinstance(item, list):
+            for nested in item:
+                visit(nested)
+
+    visit(value)
+    return counts
+
+
 def calculate(payload: object) -> dict[str, Any]:
     data = _object(payload, "input")
+    mode = _analysis_mode(data.get("analysis_mode"))
     period = _string(data.get("review_period"), "review_period")
     available = _scalar(data.get("available_hours"), "available_hours")
     if available is not None and available <= 0:
@@ -87,6 +121,14 @@ def calculate(payload: object) -> dict[str, Any]:
     delegate: list[tuple[Decimal, str]] = []
     eliminate: list[tuple[Decimal, str]] = []
     reclaimable = Decimal(0)
+    decision_unknowns: list[str] = []
+    observed_weeks = _positive_integer(data.get("observed_weeks"), "observed_weeks") if mode == "advanced" else 1
+    planning_horizon = _positive_integer(data.get("planning_horizon_weeks"), "planning_horizon_weeks") if mode == "advanced" else 1
+    fragmentation_threshold = _scalar(data.get("fragmentation_threshold_per_week"), "fragmentation_threshold_per_week") if mode == "advanced" else None
+    if mode == "advanced" and (fragmentation_threshold is None or fragmentation_threshold <= 0):
+        raise ValueError("fragmentation_threshold_per_week must be greater than zero")
+    advanced_gross_total = Decimal(0)
+    advanced_net_total = Decimal(0)
 
     for index, raw_activity in enumerate(_list(data.get("activities"), "activities")):
         path = f"activities[{index}]"
@@ -124,12 +166,91 @@ def calculate(payload: object) -> dict[str, Any]:
             flags.append("eliminate_or_reduce_candidate")
             if hours is not None:
                 reclaimable += hours
+        advanced: dict[str, Any] = {}
+        if mode == "advanced":
+            frequency = _scalar(item.get("frequency_per_week"), f"{path}.frequency_per_week")
+            context_switches = _scalar(item.get("context_switches"), f"{path}.context_switches")
+            _string(item.get("outcome_metric"), f"{path}.outcome_metric")
+            transfer = _object(item.get("transfer"), f"{path}.transfer")
+            transferable_rate = _scalar(transfer.get("transferable_rate"), f"{path}.transfer.transferable_rate")
+            if transferable_rate is not None and transferable_rate > 1:
+                raise ValueError(f"{path}.transfer.transferable_rate must be between 0 and 1")
+            initial_transition = _scalar(transfer.get("initial_transition_hours"), f"{path}.transfer.initial_transition_hours")
+            weekly_oversight = _scalar(transfer.get("weekly_oversight_hours"), f"{path}.transfer.weekly_oversight_hours")
+            recipient_capacity = _scalar(transfer.get("recipient_capacity_hours"), f"{path}.transfer.recipient_capacity_hours")
+            readiness: dict[str, str] = {}
+            for field in ("procedure_status", "quality_status", "authority_status"):
+                status_value = transfer.get(field)
+                if status_value not in READINESS_STATES:
+                    raise ValueError(f"{path}.transfer.{field} must be supported")
+                readiness[field] = str(status_value)
+            values = {
+                "frequency_per_week": frequency,
+                "context_switches": context_switches,
+                "transferable_rate": transferable_rate,
+                "initial_transition_hours": initial_transition,
+                "weekly_oversight_hours": weekly_oversight,
+                "recipient_capacity_hours": recipient_capacity,
+            }
+            for field, value in values.items():
+                if value is None:
+                    decision_unknowns.append(f"{path}.{field}")
+            weekly_hours = hours / observed_weeks if hours is not None else None
+            switches_per_week = context_switches / observed_weeks if context_switches is not None else None
+            gross_weekly = weekly_hours * transferable_rate if weekly_hours is not None and transferable_rate is not None else None
+            gross_horizon = gross_weekly * planning_horizon if gross_weekly is not None else None
+            net_horizon = gross_horizon - initial_transition - weekly_oversight * planning_horizon if gross_horizon is not None and initial_transition is not None and weekly_oversight is not None else None
+            net_weekly = gross_weekly - weekly_oversight if gross_weekly is not None and weekly_oversight is not None else None
+            payback = initial_transition / net_weekly if initial_transition is not None and net_weekly is not None and net_weekly > 0 else None
+            capacity_gap = max(Decimal(0), gross_weekly - recipient_capacity) if gross_weekly is not None and recipient_capacity is not None else None
+            gates: list[str] = []
+            if required:
+                gates.append("founder_required")
+            if capacity_gap is not None and capacity_gap > 0:
+                gates.append("recipient_capacity_shortfall")
+            for field, status_value in readiness.items():
+                if status_value != "ready":
+                    gates.append(field)
+                    if status_value == "unknown":
+                        decision_unknowns.append(f"{path}.transfer.{field}")
+            if gates:
+                transition_status = "blocked"
+            elif net_horizon is None:
+                transition_status = "indeterminate"
+            elif net_horizon <= 0:
+                transition_status = "uneconomic"
+            else:
+                transition_status = "viable"
+            if focus_score >= 16 and switches_per_week is not None and fragmentation_threshold is not None and switches_per_week > fragmentation_threshold:
+                flags.append("focus_fragmentation")
+            if transition_status == "uneconomic":
+                flags.append("transition_not_economic")
+            if capacity_gap is not None and capacity_gap > 0:
+                flags.append("recipient_capacity_shortfall")
+            if gross_horizon is not None:
+                advanced_gross_total += gross_horizon
+            if net_horizon is not None:
+                advanced_net_total += net_horizon
+            advanced = {
+                "weekly_hours": _number(weekly_hours),
+                "frequency_per_week": _number(frequency),
+                "context_switches_per_week": _number(switches_per_week),
+                "transition_gates": gates,
+                "transition_economics": {
+                    "status": transition_status,
+                    "gross_reclaimable_hours": _number(gross_horizon),
+                    "net_reclaimable_hours": _number(net_horizon),
+                    "payback_weeks": _number(payback),
+                    "recipient_capacity_gap_hours": _number(capacity_gap),
+                },
+            }
         activities.append({
             "name": name,
             "hours": _number(hours),
             "time_share": _number(share),
             "focus_score": focus_score,
             "flags": flags,
+            **advanced,
         })
 
     if available is None:
@@ -138,6 +259,12 @@ def calculate(payload: object) -> dict[str, Any]:
     allocated = known_total if all_hours_known else None
     unallocated = max(Decimal(0), available - known_total) if all_hours_known and available is not None else None
     overallocated = max(Decimal(0), known_total - available) if all_hours_known and available is not None else None
+    if status == "indeterminate":
+        quality_status = "indeterminate"
+    elif decision_unknowns:
+        quality_status = "partial"
+    else:
+        quality_status = "complete"
     return {
         "review_period": period,
         "activities": activities,
@@ -147,12 +274,21 @@ def calculate(payload: object) -> dict[str, Any]:
             "unallocated_hours": _number(unallocated),
             "overallocated_hours": _number(overallocated),
             "reclaimable_hours": _number(reclaimable) if all_hours_known else None,
+            "gross_reclaimable_hours": _number(advanced_gross_total) if mode == "advanced" else None,
+            "net_reclaimable_hours": _number(advanced_net_total) if mode == "advanced" else None,
         },
         "protect_candidates": [name for _, name in sorted(protect)],
         "delegate_candidates": [name for _, name in sorted(delegate)],
         "eliminate_or_reduce_candidates": [name for _, name in sorted(eliminate)],
         "missing_inputs": sorted(set(missing)),
         "scope": "descriptive candidates only; delegation, cancellation, and calendar changes require human approval",
+        "analysis_quality": {
+            "mode": mode,
+            "status": quality_status,
+            "evidence_counts": _evidence_counts(data),
+            "decision_changing_unknowns": sorted(set(decision_unknowns)),
+            "warnings": sorted({flag for activity in activities for flag in activity["flags"]}),
+        },
     }
 
 

@@ -1,6 +1,6 @@
 ---
 name: vendor-selection-review
-description: Compare software, service, and outsourcing vendors using total ownership cost, migration effort, fit, reliability, lock-in, contract, and exit conditions. Use before selecting, renewing, or replacing a vendor; do not use as authorization to sign, purchase, migrate, or cancel.
+description: Compare software, service, and outsourcing vendors using lifecycle cost, requirement evidence, usage scenarios, contract and exit gates, fit, and reliability. Use before selecting, renewing, or replacing a vendor; do not use as authorization to sign, purchase, migrate, or cancel.
 license: MIT
 metadata:
   author: ficilcom
@@ -13,9 +13,9 @@ metadata:
 ## 進め方
 
 1. [インテークと比較方法](references/intake-and-method.md)を読み、必須要件、利用量、既存環境、移行期限、契約・データ退出条件を確認する。
-2. 同じ通貨、税、比較期間、利用量シナリオへ揃え、値引き終了後の価格も含める。金額と工数を `confirmed`、`reported`、`estimated`、`unknown` に分ける。
+2. 同じ通貨、税、比較期間、利用量シナリオへ揃え、値引き終了後の価格も含める。金額と工数を `confirmed`、`reported`、`estimated`、`unknown` に分ける。必須要件、更新後価格、追加費用、候補別シナリオまで比較する場合は `advanced` を選び、[要件と契約](references/requirements-and-contracts.md)を読む。
 3. [計算モデル](references/calculation-model.md)に従い匿名化JSONを作り、スキルのルートで `python3 scripts/compare_vendors.py <input.json>` を実行する。
-4. TCOの順序と、機能適合、信頼性、セキュリティ、ロックイン、契約、退出可能性を別々に比較する。最低価格を自動推奨にしない。
+4. core TCO、advanced TCO、シナリオ別TCO、要件ゲート、信頼性、セキュリティ、ロックイン、契約、退出可能性を別々に比較する。最低価格や自己申告だけで選定しない。
 5. [報告書形式](references/report-format.md)で候補、失格条件、確認事項、交渉条件、小規模検証、切替・撤退条件を示す。
 
 ## 判断上の制約

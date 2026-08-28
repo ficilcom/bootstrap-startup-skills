@@ -37,7 +37,105 @@ def payload() -> dict[str, object]:
     }
 
 
+def advanced_payload() -> dict[str, object]:
+    data = payload()
+    data["analysis_mode"] = "advanced"
+    data["requirements"] = [
+        {"id": "data-export", "importance": "must"},
+        {"id": "sla", "importance": "should"},
+    ]
+    data["options"][0].update({
+        "implementation_external_cost": money(20_000),
+        "training_hours": scalar(10),
+        "monthly_support_cost": money(5_000),
+        "renewal_monthly_cost": money(40_000),
+        "renewal_start_month": 7,
+        "data_export_cost": money(20_000),
+        "requirement_results": [
+            {"id": "data-export", "status": "failed"},
+            {"id": "sla", "status": "verified"},
+        ],
+    })
+    data["options"][1].update({
+        "implementation_external_cost": money(0),
+        "training_hours": scalar(0),
+        "monthly_support_cost": money(0),
+        "renewal_monthly_cost": money(35_000),
+        "renewal_start_month": 1,
+        "data_export_cost": money(0),
+        "requirement_results": [
+            {"id": "data-export", "status": "verified"},
+            {"id": "sla", "status": "unknown"},
+        ],
+    })
+    data["scenarios"] = [{
+        "name": "high-usage",
+        "option_overrides": [
+            {"name": "vendor-a", "monthly_usage_cost": money(25_000)},
+            {"name": "vendor-b", "monthly_usage_cost": money(30_000)},
+        ],
+    }]
+    return data
+
+
 class VendorSelectionTests(unittest.TestCase):
+    def test_core_mode_adds_quality_without_changing_tco(self) -> None:
+        result = MODULE.calculate(payload())
+
+        self.assertEqual(result["analysis_quality"]["mode"], "core")
+        self.assertEqual(result["analysis_quality"]["status"], "complete")
+        self.assertEqual(result["options"][0]["horizon_tco"], 730_000)
+        self.assertEqual(result["cost_order"], ["vendor-b", "vendor-a"])
+
+    def test_advanced_mode_adds_lifecycle_costs_and_requirement_gates(self) -> None:
+        result = MODULE.calculate(advanced_payload())
+        options = {item["name"]: item for item in result["options"]}
+
+        self.assertEqual(options["vendor-a"]["advanced_horizon_tco"], 940_000)
+        self.assertEqual(options["vendor-a"]["eligibility_status"], "disqualified")
+        self.assertEqual(options["vendor-a"]["failed_gates"], ["data-export"])
+        self.assertEqual(options["vendor-b"]["eligibility_status"], "conditional")
+        self.assertEqual(options["vendor-b"]["unverified_gates"], ["sla"])
+        self.assertEqual(result["analysis_quality"]["status"], "partial")
+
+    def test_advanced_scenario_recalculates_each_option_without_changing_base_order(self) -> None:
+        result = MODULE.calculate(advanced_payload())
+        scenario = result["scenario_tco"][0]
+
+        self.assertEqual(scenario["name"], "high-usage")
+        self.assertEqual(scenario["options"]["vendor-a"], 1_120_000)
+        self.assertEqual(scenario["options"]["vendor-b"], 890_000)
+        self.assertEqual(result["cost_order"], ["vendor-b", "vendor-a"])
+
+    def test_advanced_scenario_accepts_zero_cost_override(self) -> None:
+        data = advanced_payload()
+        data["scenarios"][0]["option_overrides"][0]["monthly_usage_cost"] = money(0)
+
+        scenario = MODULE.calculate(data)["scenario_tco"][0]
+
+        self.assertEqual(scenario["options"]["vendor-a"], 820_000)
+
+    def test_advanced_mode_rejects_unknown_requirements_bad_terms_and_scenario_options(self) -> None:
+        data = advanced_payload()
+        data["requirements"][1]["id"] = "data-export"
+        with self.assertRaisesRegex(ValueError, "requirement ids must be unique"):
+            MODULE.calculate(data)
+
+        data = advanced_payload()
+        data["options"][0]["requirement_results"][0]["id"] = "missing"
+        with self.assertRaisesRegex(ValueError, "unknown requirement"):
+            MODULE.calculate(data)
+
+        data = advanced_payload()
+        data["options"][0]["renewal_start_month"] = 13
+        with self.assertRaisesRegex(ValueError, "renewal_start_month"):
+            MODULE.calculate(data)
+
+        data = advanced_payload()
+        data["scenarios"][0]["option_overrides"][0]["name"] = "missing"
+        with self.assertRaisesRegex(ValueError, "unknown option"):
+            MODULE.calculate(data)
+
     def test_calculates_tco_and_cost_order(self) -> None:
         result = MODULE.calculate(payload())
         options = {item["name"]: item for item in result["options"]}

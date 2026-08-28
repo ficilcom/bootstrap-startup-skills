@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import sys
+from datetime import date
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,8 @@ from typing import Any
 
 EVIDENCE_STATES = {"confirmed", "reported", "estimated", "unknown"}
 DEPENDENCY_TYPES = {"person", "customer", "vendor", "system", "process", "facility", "data", "other"}
+ANALYSIS_MODES = {"core", "advanced"}
+TEST_RESULTS = {"passed", "failed", "not_run", "unknown"}
 
 
 def _object(value: object, path: str) -> dict[str, Any]:
@@ -73,6 +76,56 @@ def _number(value: Decimal | None) -> int | float | None:
     return int(rounded) if rounded == rounded.to_integral() else float(rounded)
 
 
+def _analysis_mode(value: object) -> str:
+    mode = "core" if value is None else value
+    if mode not in ANALYSIS_MODES:
+        raise ValueError("analysis_mode must be core or advanced")
+    return str(mode)
+
+
+def _optional_iso_date(value: object, path: str) -> str | None:
+    if value is None:
+        return None
+    text = _string(value, path)
+    try:
+        date.fromisoformat(text)
+    except ValueError as error:
+        raise ValueError(f"{path} must be an ISO date") from error
+    return text
+
+
+def _evidence_counts(value: object) -> dict[str, int]:
+    counts = {state: 0 for state in sorted(EVIDENCE_STATES)}
+
+    def visit(item: object) -> None:
+        if isinstance(item, dict):
+            evidence = item.get("evidence")
+            if evidence in counts:
+                counts[evidence] += 1
+            for nested in item.values():
+                visit(nested)
+        elif isinstance(item, list):
+            for nested in item:
+                visit(nested)
+
+    visit(value)
+    return counts
+
+
+def _recovery_layers(graph: dict[str, list[str]]) -> list[list[str]]:
+    remaining = set(graph)
+    completed: set[str] = set()
+    layers: list[list[str]] = []
+    while remaining:
+        layer = sorted(name for name in remaining if set(graph[name]) <= completed)
+        if not layer:
+            raise ValueError("dependency graph must not contain a cycle")
+        layers.append(layer)
+        completed.update(layer)
+        remaining.difference_update(layer)
+    return layers
+
+
 def _assert_acyclic(graph: dict[str, list[str]]) -> None:
     visiting: set[str] = set()
     visited: set[str] = set()
@@ -106,6 +159,7 @@ def _affected(name: str, reverse_graph: dict[str, list[str]]) -> list[str]:
 
 def calculate(payload: object) -> dict[str, Any]:
     data = _object(payload, "input")
+    mode = _analysis_mode(data.get("analysis_mode"))
     review_date = _string(data.get("review_date"), "review_date")
     raw_items = _list(data.get("dependencies"), "dependencies", nonempty=True)
     parsed: list[dict[str, Any]] = []
@@ -137,6 +191,7 @@ def calculate(payload: object) -> dict[str, Any]:
             reverse_graph[dependency].append(dependent)
 
     missing: list[str] = []
+    decision_unknowns: list[str] = []
     results: list[dict[str, Any]] = []
     for item in parsed:
         path = item["path"]
@@ -170,6 +225,69 @@ def calculate(payload: object) -> dict[str, Any]:
             flags.append("no_tested_alternative")
         if owner is None:
             flags.append("missing_owner")
+        advanced: dict[str, Any] = {}
+        if mode == "advanced":
+            advanced_values: dict[str, Decimal | None] = {}
+            for field in (
+                "recovery_point_objective_hours",
+                "expected_data_loss_hours",
+                "minimum_operating_capacity_rate",
+                "alternative_capacity_rate",
+                "alternative_recovery_hours",
+            ):
+                raw_value = raw.get(field)
+                value = _scalar(raw_value, f"{path}.{field}") if raw_value is not None else None
+                advanced_values[field] = value
+                if value is None:
+                    decision_unknowns.append(f"{path}.{field}")
+            for field in ("minimum_operating_capacity_rate", "alternative_capacity_rate"):
+                value = advanced_values[field]
+                if value is not None and value > 1:
+                    raise ValueError(f"{path}.{field} must be between 0 and 1")
+            test_result = raw.get("test_result", "unknown")
+            if test_result not in TEST_RESULTS:
+                raise ValueError(f"{path}.test_result must be supported")
+            if test_result in {"passed", "failed"} and not tested:
+                raise ValueError(f"{path}.test_result contradicts tested_alternative")
+            if test_result == "not_run" and tested:
+                raise ValueError(f"{path}.test_result contradicts tested_alternative")
+            last_test_date = _optional_iso_date(raw.get("last_test_date"), f"{path}.last_test_date")
+            if test_result == "unknown":
+                decision_unknowns.append(f"{path}.test_result")
+            rpo = advanced_values["recovery_point_objective_hours"]
+            data_loss = advanced_values["expected_data_loss_hours"]
+            minimum_capacity = advanced_values["minimum_operating_capacity_rate"]
+            alternative_capacity = advanced_values["alternative_capacity_rate"]
+            alternative_recovery = advanced_values["alternative_recovery_hours"]
+            rpo_gap = max(Decimal(0), data_loss - rpo) if rpo is not None and data_loss is not None else None
+            capacity_gap = max(Decimal(0), minimum_capacity - alternative_capacity) if minimum_capacity is not None and alternative_capacity is not None else None
+            if rpo_gap is not None and rpo_gap > 0:
+                flags.append("rpo_exceeded")
+            if capacity_gap is not None and capacity_gap > 0:
+                flags.append("alternative_capacity_below_minimum")
+            if alternative_recovery is not None and tolerance is not None and alternative_recovery > tolerance:
+                flags.append("alternative_recovery_exceeds_tolerance")
+            if test_result == "failed":
+                flags.append("recovery_test_failed")
+            has_breach = any(flag in flags for flag in ("recovery_exceeds_tolerance", "rpo_exceeded", "alternative_capacity_below_minimum", "alternative_recovery_exceeds_tolerance", "recovery_test_failed"))
+            if any(f"{path}." in item for item in decision_unknowns):
+                priority = "review_required"
+            elif criticality == 5 and has_breach:
+                priority = "critical"
+            elif criticality >= 4 and (has_breach or test_result != "passed"):
+                priority = "high"
+            elif has_breach or test_result != "passed":
+                priority = "medium"
+            else:
+                priority = "monitor"
+            advanced = {
+                "rpo_gap_hours": _number(rpo_gap),
+                "alternative_capacity_gap_rate": _number(capacity_gap),
+                "alternative_recovery_hours": _number(alternative_recovery),
+                "last_test_date": last_test_date,
+                "test_result": test_result,
+                "priority_tier": priority,
+            }
         results.append({
             "name": item["name"],
             "type": item["type"],
@@ -180,16 +298,52 @@ def calculate(payload: object) -> dict[str, Any]:
             "blast_radius_count": len(affected),
             "risk_score": _number(risk),
             "flags": flags,
+            **advanced,
         })
 
     ranked = [item for item in results if item["risk_score"] is not None]
     ranked.sort(key=lambda item: (-item["risk_score"], item["name"]))
+    scenario_impacts: list[dict[str, Any]] = []
+    if mode == "advanced":
+        scenario_names: set[str] = set()
+        for index, raw_scenario in enumerate(data.get("scenarios", [])):
+            path = f"scenarios[{index}]"
+            scenario = _object(raw_scenario, path)
+            name = _string(scenario.get("name"), f"{path}.name")
+            if name in scenario_names:
+                raise ValueError("scenario names must be unique")
+            scenario_names.add(name)
+            failed = sorted({_string(value, f"{path}.failed_dependencies") for value in _list(scenario.get("failed_dependencies"), f"{path}.failed_dependencies", nonempty=True)})
+            for dependency in failed:
+                if dependency not in names:
+                    raise ValueError(f"{path} references unknown dependency {dependency}")
+            affected = set(failed)
+            for dependency in failed:
+                affected.update(_affected(dependency, reverse_graph))
+            scenario_impacts.append({"name": name, "failed_dependencies": failed, "affected_dependencies": sorted(affected)})
+
+    missing.extend(decision_unknowns)
+    if not ranked:
+        quality_status = "indeterminate"
+    elif missing:
+        quality_status = "partial"
+    else:
+        quality_status = "complete"
     return {
         "review_date": review_date,
         "dependencies": results,
         "risk_order": [item["name"] for item in ranked],
         "missing_inputs": sorted(set(missing)),
         "ranking_scope": "modeled likelihood, criticality, recovery, and blast radius; not an incident forecast",
+        "recovery_layers": _recovery_layers(graph) if mode == "advanced" else [],
+        "scenario_impacts": scenario_impacts,
+        "analysis_quality": {
+            "mode": mode,
+            "status": quality_status,
+            "evidence_counts": _evidence_counts(data),
+            "decision_changing_unknowns": sorted(set(decision_unknowns)),
+            "warnings": sorted({flag for item in results for flag in item["flags"]}),
+        },
     }
 
 

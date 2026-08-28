@@ -32,7 +32,92 @@ def payload() -> dict[str, object]:
     }
 
 
+def advanced_payload() -> dict[str, object]:
+    data = payload()
+    data["analysis_mode"] = "advanced"
+    data["dependencies"][0].update({
+        "tested_alternative": True,
+        "recovery_point_objective_hours": scalar(2),
+        "expected_data_loss_hours": scalar(6, "reported"),
+        "minimum_operating_capacity_rate": scalar(0.8),
+        "alternative_capacity_rate": scalar(0.5, "reported"),
+        "alternative_recovery_hours": scalar(10, "reported"),
+        "last_test_date": "2026-07-15",
+        "test_result": "failed",
+    })
+    data["dependencies"][1].update({
+        "recovery_point_objective_hours": scalar(None, "unknown"),
+        "expected_data_loss_hours": scalar(None, "unknown"),
+        "minimum_operating_capacity_rate": scalar(0.5),
+        "alternative_capacity_rate": scalar(1),
+        "alternative_recovery_hours": scalar(6),
+        "last_test_date": "2026-08-01",
+        "test_result": "passed",
+    })
+    data["dependencies"][2].update({
+        "recovery_point_objective_hours": scalar(1),
+        "expected_data_loss_hours": scalar(1),
+        "minimum_operating_capacity_rate": scalar(0.5),
+        "alternative_capacity_rate": scalar(0.5),
+        "alternative_recovery_hours": scalar(4),
+        "last_test_date": None,
+        "test_result": "not_run",
+    })
+    data["scenarios"] = [
+        {"name": "platform-and-owner-loss", "failed_dependencies": ["cloud-platform", "billing"]}
+    ]
+    return data
+
+
 class ContinuityTests(unittest.TestCase):
+    def test_core_mode_adds_quality_without_changing_existing_results(self) -> None:
+        result = MODULE.calculate(payload())
+
+        self.assertEqual(result["analysis_quality"]["mode"], "core")
+        self.assertEqual(result["analysis_quality"]["status"], "complete")
+        self.assertEqual(result["risk_order"][0], "cloud-platform")
+        self.assertEqual(result["dependencies"][0]["risk_score"], 3)
+
+    def test_advanced_mode_exposes_recovery_gaps_layers_and_priority(self) -> None:
+        result = MODULE.calculate(advanced_payload())
+        dependencies = {item["name"]: item for item in result["dependencies"]}
+
+        self.assertEqual(dependencies["cloud-platform"]["rpo_gap_hours"], 4)
+        self.assertEqual(dependencies["cloud-platform"]["alternative_capacity_gap_rate"], 0.3)
+        self.assertEqual(dependencies["cloud-platform"]["priority_tier"], "critical")
+        self.assertEqual(result["recovery_layers"], [["cloud-platform"], ["billing", "customer-portal"]])
+        self.assertEqual(result["analysis_quality"]["status"], "partial")
+        self.assertIn("dependencies[1].recovery_point_objective_hours", result["analysis_quality"]["decision_changing_unknowns"])
+
+    def test_advanced_scenarios_union_direct_and_transitive_impact(self) -> None:
+        scenario = MODULE.calculate(advanced_payload())["scenario_impacts"][0]
+
+        self.assertEqual(scenario["name"], "platform-and-owner-loss")
+        self.assertEqual(scenario["failed_dependencies"], ["billing", "cloud-platform"])
+        self.assertEqual(scenario["affected_dependencies"], ["billing", "cloud-platform", "customer-portal"])
+
+    def test_advanced_mode_rejects_invalid_modes_dates_results_and_scenario_references(self) -> None:
+        data = payload()
+        data["analysis_mode"] = "deep"
+        with self.assertRaisesRegex(ValueError, "analysis_mode"):
+            MODULE.calculate(data)
+
+        data = advanced_payload()
+        data["dependencies"][0]["last_test_date"] = "15-07-2026"
+        with self.assertRaisesRegex(ValueError, "ISO date"):
+            MODULE.calculate(data)
+
+        data = advanced_payload()
+        data["dependencies"][0]["test_result"] = "passed"
+        data["dependencies"][0]["tested_alternative"] = False
+        with self.assertRaisesRegex(ValueError, "contradicts tested_alternative"):
+            MODULE.calculate(data)
+
+        data = advanced_payload()
+        data["scenarios"][0]["failed_dependencies"] = ["missing"]
+        with self.assertRaisesRegex(ValueError, "unknown dependency"):
+            MODULE.calculate(data)
+
     def test_calculates_recovery_gap_blast_radius_and_risk_order(self) -> None:
         result = MODULE.calculate(payload())
         dependencies = {item["name"]: item for item in result["dependencies"]}
