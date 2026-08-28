@@ -4,6 +4,10 @@ Practical AI skills for founders building capital-efficient companies with reven
 
 This repository is a collection of portable [Agent Skills](https://agentskills.io/) for bootstrapped and capital-efficient startups. Each skill is independently installable and follows the open Agent Skills specification.
 
+> **日本語** — 各スキルの本文、参照ドキュメント、報告書テンプレートはすべて日本語で書かれています（`SKILL.md` のフロントマターのみ、エージェントの検索用に英語）。日本の制度を前提にしたスキルを含みます: [`bank-loan-readiness`](skills/finance/bank-loan-readiness/)（日本政策金融公庫・信用保証を含む借入準備）、[`tax-and-social-insurance-calendar`](skills/finance/tax-and-social-insurance-calendar/)（消費税・法人税・源泉所得税・特別徴収住民税・社会保険・労働保険の納付スケジュール）、[`grants`](skills/grants/) カテゴリ（補助金・助成金）、[`contractor-or-employment-structuring`](skills/hiring/contractor-or-employment-structuring/)（業務委託と雇用の線引き）、[`security-questionnaire-readiness`](skills/operations/security-questionnaire-readiness/)（取引先のセキュリティチェックシート対応）。
+>
+> 全スキルを一覧するには `npx skills add ficilcom/bootstrap-startup-skills --list`、1つだけ入れるには `--skill <skill-name>` を付けます。使い方は [Install](#install) を参照してください。いずれのスキルも、法務・税務・会計・労務の判定は行わず、外部への送信、契約、支払、顧客連絡を自動実行しません。
+
 ## What belongs here
 
 Skills in this repository should help founders make concrete operating decisions across areas such as:
@@ -128,6 +132,20 @@ npx skills add ficilcom/bootstrap-startup-skills
 ```
 
 The [`skills` CLI](https://github.com/vercel-labs/skills) also supports Claude Code, Cursor, OpenCode, and many other agents.
+
+### As a Claude Code plugin marketplace
+
+This repository is also a [plugin marketplace](https://code.claude.com/docs/en/plugin-marketplaces). Add it once, then install skills a category at a time:
+
+```
+/plugin marketplace add ficilcom/bootstrap-startup-skills
+```
+
+```
+/plugin install bootstrap-finance@bootstrap-startup-skills
+```
+
+Available plugins: `bootstrap-finance`, `bootstrap-grants`, `bootstrap-hiring`, `bootstrap-sales`, `bootstrap-marketing`, `bootstrap-operations`, `bootstrap-management`.
 
 ## Develop
 

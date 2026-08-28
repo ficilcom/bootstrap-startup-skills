@@ -1,0 +1,151 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "bootstrap-startup-skills",
+  "version": "1.0.0",
+  "description": "Practical Agent Skills for founders building capital-efficient companies with revenue, debt, grants, automation, and disciplined hiring.",
+  "owner": {
+    "name": "ficilcom"
+  },
+  "plugins": [
+    {
+      "name": "bootstrap-finance",
+      "description": "Bank debt, lender readiness, cash flow, runway, pricing, unit economics, working capital, and Japanese statutory payment scheduling. (10 skills)",
+      "version": "1.0.0",
+      "source": "./skills/finance",
+      "skills": [
+        "./accounts-receivable-control",
+        "./bank-loan-readiness",
+        "./cash-runway-planner",
+        "./customer-concentration-risk",
+        "./debt-service-capacity",
+        "./expense-and-saas-audit",
+        "./pricing-decision",
+        "./tax-and-social-insurance-calendar",
+        "./unit-economics-diagnostic",
+        "./working-capital-cycle-review"
+      ],
+      "category": "productivity",
+      "tags": [
+        "agent-skills",
+        "startup",
+        "bootstrapping",
+        "finance"
+      ]
+    },
+    {
+      "name": "bootstrap-grants",
+      "description": "Grant and subsidy fit, application readiness against the deadline, and post-award execution and reporting. (3 skills)",
+      "version": "1.0.0",
+      "source": "./skills/grants",
+      "skills": [
+        "./grant-application-readiness",
+        "./grant-execution-and-reporting",
+        "./grant-subsidy-fit"
+      ],
+      "category": "productivity",
+      "tags": [
+        "agent-skills",
+        "startup",
+        "bootstrapping",
+        "grants"
+      ]
+    },
+    {
+      "name": "bootstrap-hiring",
+      "description": "First-hire affordability, hire-versus-outsource-versus-automate comparison, candidate scorecards, and contractor engagement structure. (4 skills)",
+      "version": "1.0.0",
+      "source": "./skills/hiring",
+      "skills": [
+        "./contractor-or-employment-structuring",
+        "./first-hire-affordability",
+        "./hire-outsource-automate",
+        "./role-scorecard-and-hiring-process"
+      ],
+      "category": "productivity",
+      "tags": [
+        "agent-skills",
+        "startup",
+        "bootstrapping",
+        "hiring"
+      ]
+    },
+    {
+      "name": "bootstrap-sales",
+      "description": "Pipeline diagnosis, deal qualification, forecast calibration, and sell-side contract terms. (4 skills)",
+      "version": "1.0.0",
+      "source": "./skills/sales",
+      "skills": [
+        "./customer-contract-terms-review",
+        "./founder-led-sales-review",
+        "./sales-deal-qualification",
+        "./sales-forecast-confidence"
+      ],
+      "category": "productivity",
+      "tags": [
+        "agent-skills",
+        "startup",
+        "bootstrapping",
+        "sales"
+      ]
+    },
+    {
+      "name": "bootstrap-marketing",
+      "description": "Channel economics, retention cohorts, growth experiments, and offer portfolio decisions. (4 skills)",
+      "version": "1.0.0",
+      "source": "./skills/marketing",
+      "skills": [
+        "./channel-economics-review",
+        "./customer-retention-review",
+        "./growth-experiment-review",
+        "./offer-portfolio-review"
+      ],
+      "category": "productivity",
+      "tags": [
+        "agent-skills",
+        "startup",
+        "bootstrapping",
+        "marketing"
+      ]
+    },
+    {
+      "name": "bootstrap-operations",
+      "description": "Process bottlenecks, delivery capacity, vendor selection, business continuity, and customer security questionnaires. (5 skills)",
+      "version": "1.0.0",
+      "source": "./skills/operations",
+      "skills": [
+        "./business-continuity-check",
+        "./capacity-and-backlog-plan",
+        "./process-bottleneck-audit",
+        "./security-questionnaire-readiness",
+        "./vendor-selection-review"
+      ],
+      "category": "productivity",
+      "tags": [
+        "agent-skills",
+        "startup",
+        "bootstrapping",
+        "operations"
+      ]
+    },
+    {
+      "name": "bootstrap-management",
+      "description": "The founder operating cadence: weekly review, monthly variance, quarterly capital allocation, annual plan, and founder time. (5 skills)",
+      "version": "1.0.0",
+      "source": "./skills/management",
+      "skills": [
+        "./annual-operating-plan",
+        "./founder-time-allocation",
+        "./monthly-budget-variance-review",
+        "./quarterly-capital-allocation",
+        "./weekly-founder-review"
+      ],
+      "category": "productivity",
+      "tags": [
+        "agent-skills",
+        "startup",
+        "bootstrapping",
+        "management"
+      ]
+    }
+  ]
+}
